@@ -1,0 +1,79 @@
+ADHEEB ASHIM
+AI Engineer | Generative AI | RAG Systems | LLM Applications | Data Engineering
+
+Location: Nilambur, Kerala (Open to Relocate)
+Phone: +91 8281759103 / +91 7306134684
+Email: adheebashim1010@gmail.com
+LinkedIn: https://www.linkedin.com/in/adheeb-hashim/
+GitHub: https://github.com/Adheebashim
+Portfolio: https://adheebashim.dev/
+
+SUMMARY
+Emerging AI Engineer with hands-on experience building production-grade Generative AI applications, Retrieval-Augmented Generation (RAG) systems, and LLM-powered automation platforms. Currently at NielsenIQ managing enterprise-scale data operations, delivering Python and VBA automation tools that cut manual effort by 60% across global brand datasets. Independently developed an AI Second Brain (FastAPI + Docker + Pinecone + Groq) with long-term vector memory and semantic search, alongside an AI Resume Optimizer and a live portfolio chatbot (Gemini API). Certified in Databricks RAG architecture and Generative AI Fundamentals. Seeking to transition fully into AI/GenAI/NLP engineering.
+
+EXPERIENCE
+
+Data Analyst / Automation Engineer — NielsenIQ, Chennai, India | Jul 2024 – Present
+- Built Python and VBA automation solutions eliminating 60% of manual effort across 20+ recurring reporting workflows, applying an engineering mindset to data operations at enterprise scale.
+- Engineered a VBA Macro tool to split, clean, and standardise 100K+ row datasets, reducing processing time from hours to minutes (~3× throughput improvement).
+- Developed a Power Apps Attendance Tracker with automated reminders and real-time alerts — a fully deployed internal application.
+- Designed Power BI dashboards consolidating 10+ data sources, improving stakeholder self-serve analytics and cross-functional data accessibility.
+- Maintained 99% data accuracy across enterprise retail and beauty datasets for global brands (L'Oréal, Coty), directly relevant to training data curation and pipeline quality.
+- Coordinated with cross-functional and cross-time-zone teams, developing communication and project management skills applicable to distributed AI engineering teams.
+
+Data Research & Development Intern — Vyza Solutions, Hyderabad, India | Dec 2023 – Jun 2024
+- Contributed to AI-powered chatbot development and conversational workflow optimisation using NLP-driven design and prompt engineering techniques.
+- Worked on LLM-assisted automation workflows, prompt testing, and documentation of AI application architectures.
+- Tested and validated AI workflow updates in staging environments, building foundational MLOps and QA intuition.
+
+AI PROJECTS
+
+AI Second Brain — Production Personal AI Assistant
+Technologies: FastAPI, Docker, Pinecone, Groq, RAG, SQLite, Pandas
+- Built a fully containerised, production-style AI assistant using FastAPI and Docker with a scalable microservice architecture.
+- Engineered a long-term vector memory system using Pinecone and Groq for low-latency semantic retrieval and persistent conversational memory across sessions.
+- Implemented end-to-end RAG pipelines supporting PDF upload, contextual retrieval, and intelligent document chat, with an in-memory Pandas pipeline for spreadsheet ingestion.
+- Developed a SQLite-based background scheduler for automated Telegram notifications and task management; optimised embedding retrieval for scalable memory under concurrent load.
+
+AI Resume Optimizer & Career Assistant
+Technologies: Python, Generative AI, Prompt Engineering, LLM Workflows
+- Built an ATS optimisation platform that analyses resumes against job descriptions using LLM inference and structured prompt engineering pipelines.
+- Delivered AI-generated resume enhancement, cover letter writing, and personalised cold email generation — a complete end-to-end application.
+
+AI Portfolio Chatbot Assistant
+Technologies: Python, Gemini API, JavaScript
+- Developed and deployed an AI-powered chatbot into a live portfolio website using the Gemini API, handling real-time conversational queries with context management.
+
+Naukri Job Market Analysis
+Technologies: Python, BeautifulSoup, Pandas, Power BI
+- Scraped 1,000+ job listings, cleaned and analysed data in Python to surface hiring hotspots and salary trends; delivered an interactive Power BI dashboard.
+
+SKILLS
+Languages & Frameworks: Python, SQL, FastAPI, Streamlit, REST APIs, JavaScript
+Generative AI & LLMs: RAG, Prompt Engineering, LLM Integration, Semantic Search, Vector Embeddings, Conversational AI, AI Agents
+Tools & Platforms: Pinecone, Groq, Gemini API, Docker, Git/GitHub, SQLite, Pandas, NumPy, Power BI, Excel VBA
+AI/ML Concepts: Vector Databases, Embedding Models, Workflow Automation, Data Pipelines, NLP, Document AI
+
+EDUCATION
+M.Sc. Data Science — Chandigarh University | 2024–2026
+B.Sc. Statistics — Sree Sankara College, Kalady — MG University | 2019–2022
+
+CERTIFICATIONS
+- Databricks — Building Retrieval Agents on Databricks (2026) | Credential: 183190142
+- Databricks — Generative AI Fundamentals (2026) | Credential: 183178765
+- Udacity — AWS AI Practitioner Challenge (2026)
+- Dubai One Million Prompters Initiative — Prompt Engineering & Generative AI
+- Google — Data Analytics Professional Certificate
+- IBM — Python 101 for Data Science
+- Accenture — Data Analytics & Visualisation Virtual Experience
+
+LINKS FOR PDF HYPERLINKS
+LinkedIn display text: LinkedIn
+LinkedIn URL: https://www.linkedin.com/in/adheeb-hashim/
+GitHub display text: GitHub
+GitHub URL: https://github.com/Adheebashim
+Portfolio display text: Portfolio
+Portfolio URL: https://adheebashim.dev/
+
+NOTE FOR PDF GENERATION
+Use the three URLs above as hyperlink targets for the displayed words “LinkedIn”, “GitHub”, and “Portfolio” in the generated PDF. Do not print placeholder link text.
