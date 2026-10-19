@@ -1,4 +1,0 @@
-python-telegram-bot[webhooks]==21.6
-requests
-reportlab
-ddgs
