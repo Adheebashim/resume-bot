@@ -1,14 +1,20 @@
 import os
 import re
-import io
 import json
+from datetime import datetime
+import io
 import base64
 import requests
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 import ipaddress
 import socket
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from email.message import EmailMessage
+from email.utils import formataddr, parseaddr
 
 from xml.sax.saxutils import escape
 from ddgs import DDGS
@@ -19,6 +25,8 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from pypdf import PdfReader
+from docx import Document
+import gspread
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -45,11 +53,39 @@ GMAIL_CLIENT_SECRET = os.environ.get("GMAIL_CLIENT_SECRET")
 GMAIL_REFRESH_TOKEN = os.environ.get("GMAIL_REFRESH_TOKEN")
 GMAIL_SENDER = os.environ.get("GMAIL_SENDER")
 
-with open("resume.txt", "r", encoding="utf-8") as resume_file:
-    RESUME = resume_file.read()
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", "Applications")
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
-GEMINI_MODEL = "gemini-2.5-flash"
+TEMPLATE_DIR = Path(os.environ.get("RESUME_TEMPLATE_DIR", "templates"))
+TEMPLATES = {
+    "data_engineer": TEMPLATE_DIR / "Adheeb_DataEngineer.docx",
+    "ai_engineer": TEMPLATE_DIR / "Adheeb_AIEngineer.docx",
+    "data_analyst": TEMPLATE_DIR / "Adheeb_DataAnalyst.docx",
+}
+ROLE_LABELS = {
+    "data_engineer": "Data Engineer",
+    "ai_engineer": "AI Engineer",
+    "data_analyst": "Data Analyst",
+}
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+def read_docx_text(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Resume template not found: {path}. Add the three Word files to the templates/ folder.")
+    document = Document(str(path))
+    return "\n".join(p.text for p in document.paragraphs if p.text.strip())
+
+def get_default_resume_text() -> str:
+    # Compatibility fallback for old commands; Data Analyst is the neutral default.
+    try:
+        return read_docx_text(TEMPLATES["data_analyst"])
+    except Exception:
+        legacy = Path("resume.txt")
+        return legacy.read_text(encoding="utf-8") if legacy.exists() else ""
+
+RESUME = get_default_resume_text()
 
 
 # ---------------------------------------------------------------------
@@ -84,10 +120,11 @@ def _gemini(prompt: str) -> str:
 
 def ask(prompt: str):
     providers = []
-    if GROQ_KEY:
-        providers.append(("Groq", _groq))
+    # Gemini is primary; Groq is the automatic fallback.
     if GEMINI_KEY:
         providers.append(("Gemini", _gemini))
+    if GROQ_KEY:
+        providers.append(("Groq", _groq))
 
     if not providers:
         raise RuntimeError(
@@ -265,7 +302,8 @@ async def interactive_reply(update: Update, text: str) -> None:
             "Here's what I can do:\n"
             "• Chat normally — say hi and I'll reply.\n"
             "• Send a job description as text, a public job-post link, or a screenshot.\n"
-            "• Upload a resume PDF to use it for a specific application, or use /use_default for the saved resume.\n"
+            "• I'll automatically select the best of your three Word templates: Data Engineer, AI Engineer, or Data Analyst.\n"
+            "• You can upload a PDF if you want to use a custom resume for one application.\n"
             "• Send a public job-post link or upload a screenshot.\n"
             "• Include a recruiter email, or send it when I ask.\n"
             "• Review the fit, tailor your resume, and show you a PDF to approve.\n"
@@ -311,18 +349,95 @@ def parse_json(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------
+# Google Sheets application tracker
+# ---------------------------------------------------------------------
+SHEET_HEADERS = [
+    "Applied/Created At", "Company", "Job Role", "Resume Used",
+    "Recruiter Email", "Fit Score (/10)", "Application Status", "Source",
+    "Resume Filename",
+]
+
+
+def get_tracking_worksheet():
+    """Return the configured Google Sheet tab, or None if tracking is not configured."""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
+        return None
+    credentials_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+    client = gspread.service_account_from_dict(credentials_info)
+    spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+    try:
+        worksheet = spreadsheet.worksheet(GOOGLE_SHEET_TAB)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=GOOGLE_SHEET_TAB, rows=1000, cols=len(SHEET_HEADERS))
+    current = worksheet.row_values(1)
+    if current[:len(SHEET_HEADERS)] != SHEET_HEADERS:
+        if not current:
+            worksheet.append_row(SHEET_HEADERS, value_input_option="USER_ENTERED")
+        elif current[0] != SHEET_HEADERS[0]:
+            worksheet.insert_row(SHEET_HEADERS, 1, value_input_option="USER_ENTERED")
+    return worksheet
+
+
+def log_application(company: str, role: str, resume_used: str, recipient: str,
+                    fit_score: str, status: str, source: str, filename: str):
+    """Append one application-preparation row; return its worksheet row number."""
+    worksheet = get_tracking_worksheet()
+    if worksheet is None:
+        return None
+    row = [
+        datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        company or "Unknown",
+        role or "Unknown",
+        resume_used or "Unknown",
+        recipient or "",
+        fit_score,
+        status,
+        source or "Job description",
+        filename or "",
+    ]
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
+    return len(worksheet.get_all_values())
+
+
+def update_application_status(row_number, status: str):
+    if not row_number:
+        return
+    worksheet = get_tracking_worksheet()
+    if worksheet is not None:
+        # Application Status is column G.
+        worksheet.update_cell(int(row_number), 7, status)
+
+
+# ---------------------------------------------------------------------
 # Job parsing, company research, and fit decision
 # ---------------------------------------------------------------------
 def extract(jd: str) -> dict:
     prompt = (
-        'From this job posting return ONLY valid JSON: '
-        '{"company": "", "role": "", "key_skills": []}\n\n'
+        'Classify this job into exactly one target role and return ONLY valid JSON: '
+        '{"company":"", "role":"", "key_skills":[], '
+        '"template_role":"data_engineer|ai_engineer|data_analyst"}. '
+        'Choose by actual responsibilities, not job title alone. Data engineering covers ETL, pipelines, warehouses, orchestration; '
+        'AI engineering covers LLMs, RAG, agents, ML/AI application development; data analytics covers SQL, BI, reporting, insights.\n\n'
         + jd
     )
     try:
-        return parse_json(ask(prompt)[0])
+        result = parse_json(ask(prompt)[0])
     except Exception:
-        return {}
+        result = {}
+    result.setdefault("company", "")
+    result.setdefault("role", "")
+    result.setdefault("key_skills", [])
+    selected = str(result.get("template_role", "")).strip().lower()
+    if selected not in TEMPLATES:
+        text = (str(result.get("role", "")) + "\n" + jd).lower()
+        if any(k in text for k in ("generative ai", "agentic ai", "llm", "rag", "machine learning engineer", "ai engineer", "artificial intelligence")):
+            selected = "ai_engineer"
+        elif any(k in text for k in ("data engineer", "etl", "data pipeline", "data warehouse", "dbt", "airflow", "spark", "databricks")):
+            selected = "data_engineer"
+        else:
+            selected = "data_analyst"
+    result["template_role"] = selected
+    return result
 
 
 def research(company: str) -> str:
@@ -343,33 +458,25 @@ def research(company: str) -> str:
 
 
 def decide(jd: str, company_ctx: str, resume_text: str) -> dict:
-    prompt = f"""You are a hiring-fit analyst. Compare the resume to the job and
-company information. Return ONLY valid JSON:
-{{"fit_score": 0, "verdict": "apply|stretch|skip",
- "angle": "one sentence on how to position the candidate",
- "emphasize": ["resume items to put first"],
- "gaps": ["missing requirements"]}}
-Use a fit_score from 0 to 100. Be honest and do not inflate the score.
+    prompt = f"""Compare this candidate's resume with the job description and return ONLY valid JSON:
+{{"fit_score": 0}}
+Give fit_score as an integer from 0 to 100 based on relevant skills, experience, projects, and required qualifications. Be realistic; do not inflate the score. Do not return a verdict, angle, gaps, or recommendations.
 
 RESUME:
 {resume_text}
 
-COMPANY INFO (web snippets may be incomplete):
+COMPANY INFO:
 {company_ctx or 'none found'}
 
 JOB DESCRIPTION:
 {jd}"""
-
     try:
         result = parse_json(ask(prompt)[0])
-        if "fit_score" in result:
-            try:
-                result["fit_score"] = max(0, min(100, int(result["fit_score"])))
-            except (ValueError, TypeError):
-                result["fit_score"] = "?"
+        score = int(float(result.get("fit_score", 0)))
+        result["fit_score"] = max(0, min(100, score))
         return result
     except Exception:
-        return {}
+        return {"fit_score": 0}
 
 
 def tailor(jd: str, company_ctx: str, decision: dict, resume_text: str):
@@ -383,9 +490,6 @@ Rules:
 - Do not state unverified claims about the company.
 - Output plain text only, no Markdown symbols, ideally one page.
 
-POSITIONING: {decision.get('angle', '')}
-PUT FIRST: {decision.get('emphasize', [])}
-
 RESUME:
 {resume_text}
 
@@ -395,6 +499,116 @@ COMPANY INFO:
 JOB DESCRIPTION:
 {jd}"""
     return ask(prompt)
+
+
+# ---------------------------------------------------------------------
+# Word template tailoring and PDF conversion
+# ---------------------------------------------------------------------
+def _set_paragraph_text(paragraph, value: str) -> None:
+    """Replace text while retaining the paragraph's existing style and layout."""
+    runs = paragraph.runs
+    if runs:
+        runs[0].text = value
+        for run in runs[1:]:
+            run.text = ""
+    else:
+        paragraph.add_run(value)
+
+def _template_sections(document):
+    paragraphs = document.paragraphs
+    texts = [p.text.strip() for p in paragraphs]
+    summary_idx = next((i for i, t in enumerate(texts) if t.upper() == "SUMMARY"), None)
+    experience_idx = next((i for i, t in enumerate(texts) if t.upper() == "EXPERIENCE"), None)
+    project_idx = next((i for i, t in enumerate(texts) if t.upper() in {"PROJECTS", "AI PROJECTS"}), None)
+    skills_idx = next((i for i, t in enumerate(texts) if t.upper() == "SKILLS"), None)
+    if None in (summary_idx, experience_idx, project_idx, skills_idx):
+        raise ValueError("The selected Word template is missing a required section heading.")
+    summary = summary_idx + 1
+    nielsen_idx = next((i for i, t in enumerate(texts) if i > experience_idx and "NielsenIQ" in t), None)
+    vyza_idx = next((i for i, t in enumerate(texts) if i > experience_idx and "Vyza Solutions" in t), None)
+    if nielsen_idx is None or vyza_idx is None or not (nielsen_idx < vyza_idx < project_idx):
+        raise ValueError("Could not identify the experience sections in the selected Word template.")
+    nielsen_bullets = [i for i in range(nielsen_idx + 1, vyza_idx) if texts[i]]
+    intern_bullets = [i for i in range(vyza_idx + 1, project_idx) if texts[i]]
+    project_bullets = [i for i in range(project_idx + 1, skills_idx) if texts[i] and " | " not in texts[i] and "  |  " not in texts[i]]
+    return {"summary": summary, "nielsen": nielsen_bullets, "intern": intern_bullets, "projects": project_bullets}
+
+def tailor_docx(template_role: str, jd: str, company_ctx: str, decision: dict) -> bytes:
+    template_path = TEMPLATES[template_role]
+    document = Document(str(template_path))
+    sections = _template_sections(document)
+    paragraphs = document.paragraphs
+    source_summary = paragraphs[sections["summary"]].text
+    source_nielsen = [paragraphs[i].text for i in sections["nielsen"]]
+    source_intern = [paragraphs[i].text for i in sections["intern"]]
+    source_projects = [paragraphs[i].text for i in sections["projects"]]
+    prompt = f"""Tailor the resume content for this job. Return ONLY valid JSON with this exact shape:
+{{
+  \"summary\": \"...\",
+  \"nielsen_bullets\": [exactly {len(source_nielsen)} strings],
+  \"intern_bullets\": [exactly {len(source_intern)} strings],
+  \"project_bullets\": [exactly {len(source_projects)} strings]
+}}
+Rules: use only facts supported by the source resume; never invent skills, tools, employers, dates, credentials, achievements, or metrics. Rephrase and reorder emphasis only. Keep each bullet concise enough to fit the existing resume layout. Do not include bullet symbols. Keep all strings plain text. Preserve the candidate's name as Adheeb Ashim; never replace it with the word Resume.
+Target role: {ROLE_LABELS[template_role]}
+Emphasize: {decision.get('emphasize', [])}
+Existing summary: {source_summary}
+Existing NielsenIQ bullets: {json.dumps(source_nielsen, ensure_ascii=False)}
+Existing internship bullets: {json.dumps(source_intern, ensure_ascii=False)}
+Existing project bullets: {json.dumps(source_projects, ensure_ascii=False)}
+Company context: {company_ctx or 'none'}
+Job description: {jd}
+"""
+    output, _model = ask(prompt)
+    data = parse_json(output)
+    replacements = [
+        (sections["summary"], data.get("summary")),
+    ]
+    for key, indices in (("nielsen_bullets", sections["nielsen"]), ("intern_bullets", sections["intern"]), ("project_bullets", sections["projects"])):
+        values = data.get(key)
+        if not isinstance(values, list) or len(values) != len(indices) or not all(isinstance(v, str) and v.strip() for v in values):
+            raise ValueError(f"The AI returned an invalid {key} structure. Please retry.")
+        replacements.extend(zip(indices, values))
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("The AI did not return a valid resume summary. Please retry.")
+    for index, value in replacements:
+        _set_paragraph_text(paragraphs[index], value.strip())
+    document.core_properties.title = f"Adheeb Ashim - {ROLE_LABELS[template_role]} Resume"
+    document.core_properties.author = "Adheeb Ashim"
+    document.core_properties.subject = f"Tailored application resume for {ROLE_LABELS[template_role]}"
+    output_buffer = io.BytesIO()
+    document.save(output_buffer)
+    return output_buffer.getvalue()
+
+def docx_to_pdf(docx_bytes: bytes) -> bytes:
+    """Convert a tailored Word file using LibreOffice, installed in the Render build."""
+    executable = shutil.which("libreoffice") or shutil.which("soffice")
+    if not executable:
+        raise RuntimeError("LibreOffice is not installed. Use the included Render build command to install libreoffice-writer.")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp = Path(temp_dir)
+        docx_path = temp / "Adheeb_Tailored_Resume.docx"
+        docx_path.write_bytes(docx_bytes)
+        result = subprocess.run(
+            [executable, "-env:UserInstallation=file://" + str(temp / "lo-profile"), "--headless", "--convert-to", "pdf", "--outdir", str(temp), str(docx_path)],
+            capture_output=True, text=True, timeout=90, check=False,
+        )
+        pdf_path = temp / "Adheeb_Tailored_Resume.pdf"
+        if result.returncode != 0 or not pdf_path.exists():
+            detail = (result.stderr or result.stdout or "No conversion details").strip()
+            raise RuntimeError("Word-to-PDF conversion failed: " + detail[:500])
+        pdf = pdf_path.read_bytes()
+        reader = PdfReader(io.BytesIO(pdf))
+        if not reader.pages or len(reader.pages) > 3:
+            raise RuntimeError(f"Generated resume has {len(reader.pages)} pages. Please shorten the content and try again.")
+        if len("\n".join(p.extract_text() or "" for p in reader.pages).strip()) < 250:
+            raise RuntimeError("Generated PDF text validation failed. Please retry.")
+        return pdf
+
+def safe_filename(value: str, max_len: int = 45) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value or "").strip("_")
+    return (cleaned[:max_len].strip("_") or "Application")
 
 
 # ---------------------------------------------------------------------
@@ -528,7 +742,7 @@ def make_pdf(text: str) -> bytes:
     return buffer.getvalue()
 
 
-def send_mail(to: str, subject: str, pdf: bytes) -> None:
+def send_mail(to: str, subject: str, pdf: bytes, filename: str, role: str = "", company: str = "") -> None:
     """Send a resume PDF through the Gmail API using OAuth refresh credentials."""
     required = {
         "GMAIL_CLIENT_ID": GMAIL_CLIENT_ID,
@@ -569,18 +783,23 @@ def send_mail(to: str, subject: str, pdf: bytes) -> None:
 
     message = EmailMessage()
     message["To"] = to
-    message["From"] = GMAIL_SENDER
+    sender_email = parseaddr(GMAIL_SENDER)[1] or GMAIL_SENDER
+    message["From"] = formataddr(("Adheeb Ashim", sender_email))
     message["Subject"] = subject
+    greeting = "Dear Hiring Team,"
+    position = f" for the {role} position" if role else ""
+    at_company = f" at {company}" if company else ""
     message.set_content(
-        "Hello,\n\n"
-        "Please find my resume attached for your consideration.\n\n"
-        "Regards"
+        f"{greeting}\n\n"
+        f"Please find attached my resume{position}{at_company} for your consideration.\n\n"
+        "Regards,\n"
+        "Adheeb Ashim\n"
     )
     message.add_attachment(
         pdf,
         maintype="application",
         subtype="pdf",
-        filename="Resume.pdf",
+        filename=filename,
     )
 
     raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
@@ -617,8 +836,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Resume Bot is online!\n\n"
             "Say hi to chat, send a public job-post link or job description, or upload a screenshot. "
             "I can read the screenshot, ask for the recruiter email if needed, "
-            "assess fit, tailor your resume, and ask before emailing it. "
-            "Upload a resume PDF for a specific application, or use /use_default to use your saved resume. Send /help for all options."
+            "tailor your resume and ask before emailing it. "
+            "I'll automatically choose among your Data Engineer, AI Engineer, and Data Analyst Word templates. Upload a PDF only if you want to use a custom resume for one application. Send /help for all options."
         )
 
 
@@ -673,10 +892,11 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "I can help you in these ways:\n"
             "• Say hi or ask a general question — I'll reply conversationally.\n"
             "• Send a job description as text, a public job-post link, or a screenshot.\n"
-            "• Upload a resume PDF to use it for a specific application, or use /use_default for the saved resume.\n"
+            "• I'll automatically select the best of your three Word templates: Data Engineer, AI Engineer, or Data Analyst.\n"
+            "• You can upload a PDF if you want to use a custom resume for one application.\n"
             "• Send a public job-post link or upload a screenshot — I'll extract available text.\n"
             "• If the recruiter email is missing, I'll ask you for it.\n"
-            "• I'll research the company, score the fit, tailor your resume, and create a PDF.\n"
+            "• I'll create a tailored PDF and show a simple job-fit score out of 10.\n"
             "• I'll email it only after you press the Send button."
         )
 
@@ -687,80 +907,103 @@ async def process_job_posting(
     job_text: str,
     resume_choice_confirmed: bool = False,
 ) -> None:
-    """Extract job details, assess fit, tailor the selected resume, and prepare a PDF."""
+    """Select the best default role template, tailor it, and prepare an approval PDF."""
     message = update.effective_message
     if not message:
         return
 
-    if not resume_choice_confirmed and not ctx.user_data.get("selected_resume_text"):
-        ctx.user_data["pending_resume_choice_job"] = job_text
-        await message.reply_text(
-            "Job details received. Which resume should I tailor?\n\n"
-            "📎 Upload a PDF to use that resume, or send /use_default to use your saved resume.txt."
-        )
-        return
-
-    active_resume = ctx.user_data.get("selected_resume_text", RESUME)
     emails = re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", job_text)
     recipient = emails[0] if emails else ctx.user_data.get("pending_recipient")
     if not recipient:
         ctx.user_data["pending_job_text"] = job_text
         await message.reply_text(
-            "I extracted the job details. 📄\n\n"
-            "What is the recruiter's email address? Send just the email address "
-            "and I'll continue."
+            "What is the recruiter's email address? Send just the email address and I'll continue."
         )
         return
 
     ctx.user_data.pop("pending_job_text", None)
     ctx.user_data.pop("pending_recipient", None)
-
-    status = await message.reply_text(
-        "Got it! 🔎 Researching the company and tailoring your resume. This may take a minute..."
-    )
+    status = await message.reply_text("Analysing the role and tailoring your resume…")
 
     try:
         info = extract(job_text)
-        company = str(info.get("company", "") or "")
-        role = str(info.get("role", "") or "")
+        company = str(info.get("company", "") or "").strip()
+        role = str(info.get("role", "") or "").strip()
+        template_role = info.get("template_role", "data_analyst")
+        if template_role not in TEMPLATES:
+            template_role = "data_analyst"
         company_ctx = research(company)
-        decision = decide(job_text, company_ctx, active_resume)
-        resume_text, used_model = tailor(job_text, company_ctx, decision, active_resume)
-        pdf = make_pdf(resume_text)
+
+        # An uploaded PDF can be used as a one-off custom source; otherwise use the
+        # automatically selected, role-specific Word template.
+        uploaded_text = ctx.user_data.get("selected_resume_text") if ctx.user_data.get("selected_resume_source") == "uploaded" else None
+        if uploaded_text:
+            decision = decide(job_text, company_ctx, uploaded_text)
+            tailored_text, used_model = tailor(job_text, company_ctx, decision, uploaded_text)
+            pdf = make_pdf(tailored_text)
+            template_label = "Custom uploaded resume"
+        else:
+            if not TEMPLATES[template_role].exists():
+                raise FileNotFoundError(
+                    f"Missing template {TEMPLATES[template_role]}. Add all three Word templates to the GitHub templates/ folder."
+                )
+            active_resume = read_docx_text(TEMPLATES[template_role])
+            decision = decide(job_text, company_ctx, active_resume)
+            docx_bytes = tailor_docx(template_role, job_text, company_ctx, decision)
+            pdf = docx_to_pdf(docx_bytes)
+            used_model = "Gemini primary / Groq fallback"
+            template_label = ROLE_LABELS[template_role]
         ctx.user_data.pop("selected_resume_text", None)
         ctx.user_data.pop("selected_resume_source", None)
     except Exception as exc:
-        await status.edit_text(f"Sorry, I couldn't generate the resume: {exc}")
+        await status.edit_text(f"Sorry, I couldn't generate the resume: {str(exc)[:900]}")
         return
 
+    filename = f"Adheeb_{safe_filename(ROLE_LABELS.get(template_role, role or 'Tailored_Resume'))}_{safe_filename(company) if company else 'Application'}.pdf"
+    subject_role = role or ROLE_LABELS.get(template_role, "Job")
+    subject_company = f" | {company}" if company else ""
+    subject = f"Adheeb Ashim | Application for {subject_role}{subject_company}"
     key = str(message.message_id)
-    subject = f"Application for {role}" if role else "Job Application - Resume"
-    ctx.bot_data[key] = {"to": recipient, "pdf": pdf, "subject": subject}
+    score_100 = decision.get("fit_score", 0)
+    try:
+        fit_score_10 = round(float(score_100) / 10, 1)
+    except (TypeError, ValueError):
+        fit_score_10 = 0.0
+    resume_used = template_label
+    source = str(ctx.user_data.pop("application_source", "Job description"))
+    try:
+        sheet_row = log_application(
+            company=company,
+            role=role or ROLE_LABELS.get(template_role, ""),
+            resume_used=resume_used,
+            recipient=recipient,
+            fit_score=f"{fit_score_10}/10",
+            status="Awaiting approval",
+            source=source,
+            filename=filename,
+        )
+    except Exception as sheet_exc:
+        sheet_row = None
+        print(f"Google Sheets logging failed: {sheet_exc}")
 
-    gaps = decision.get("gaps", [])
-    if not isinstance(gaps, list):
-        gaps = [str(gaps)] if gaps else []
-
+    ctx.bot_data[key] = {
+        "to": recipient, "pdf": pdf, "subject": subject, "filename": filename,
+        "role": role or ROLE_LABELS.get(template_role, ""), "company": company,
+        "resume_used": resume_used, "fit_score_10": fit_score_10,
+        "sheet_row": sheet_row,
+    }
     caption = (
-        f"{role or 'Role not identified'} at {company or 'Company not identified'}\n"
-        f"Fit: {decision.get('fit_score', '?')}/100 "
-        f"({decision.get('verdict', '?')})\n"
-        f"Angle: {decision.get('angle', '-')}\n"
-        f"Gaps: {', '.join(map(str, gaps)) or '-'}\n"
-        f"Model: {used_model}"
+        f"{role or ROLE_LABELS.get(template_role, 'Role not identified')} · {company or 'Company not identified'}\n"
+        f"Resume used: {resume_used}\n"
+        f"Job fit: {fit_score_10}/10"
     )[:1000]
-
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"Send to {recipient}", callback_data=f"send:{key}"),
+        InlineKeyboardButton("Send resume", callback_data=f"send:{key}"),
         InlineKeyboardButton("Cancel", callback_data=f"no:{key}"),
     ]])
-
     await status.delete()
     await message.reply_document(
-        document=io.BytesIO(pdf),
-        filename="Resume.pdf",
-        caption=caption,
-        reply_markup=keyboard,
+        document=io.BytesIO(pdf), filename=filename, caption=caption, reply_markup=keyboard,
     )
 
 
@@ -800,6 +1043,7 @@ async def on_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             # Keep the original URL as context; page text may omit the company/role.
             combined_text = f"Job-post URL: {url}\n\nExtracted public page text:\n{page_text}"
+            ctx.user_data["application_source"] = "Job link"
             await status.delete()
             await process_job_posting(update, ctx, combined_text)
         except Exception as exc:
@@ -812,6 +1056,7 @@ async def on_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # A job description can include an email directly, or bot can ask for it.
     if is_likely_job_posting(text):
+        ctx.user_data["application_source"] = "Text job description"
         await process_job_posting(update, ctx, text)
         return
 
@@ -840,6 +1085,7 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if is_likely_job_posting(extracted_text):
+            ctx.user_data["application_source"] = "Screenshot"
             await status.edit_text("I extracted the screenshot text. Preparing your application...")
             await process_job_posting(update, ctx, extracted_text)
         else:
@@ -882,14 +1128,22 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             # Keep the item until sending succeeds, so a transient email error
             # does not discard the generated PDF.
-            send_mail(item["to"], item["subject"], item["pdf"])
+            send_mail(item["to"], item["subject"], item["pdf"], item["filename"], item.get("role", ""), item.get("company", ""))
+            try:
+                update_application_status(item.get("sheet_row"), "Sent")
+            except Exception as sheet_exc:
+                print(f"Google Sheets status update failed: {sheet_exc}")
             ctx.bot_data.pop(key, None)
-            await query.message.reply_text(f"Resume emailed to {item['to']}.")
+            await query.message.reply_text(f"Resume sent to {item['to']}.")
         except Exception as exc:
             await query.message.reply_text(f"Email failed: {exc}")
     elif action == "no":
+        try:
+            update_application_status(item.get("sheet_row"), "Cancelled")
+        except Exception as sheet_exc:
+            print(f"Google Sheets status update failed: {sheet_exc}")
         ctx.bot_data.pop(key, None)
-        await query.message.reply_text("Cancelled. The email was not sent.")
+        await query.message.reply_text("Cancelled. No email was sent.")
     else:
         await query.message.reply_text("Unknown action.")
 
