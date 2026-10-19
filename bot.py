@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 from datetime import datetime
 import io
 import base64
@@ -68,8 +69,21 @@ ROLE_LABELS = {
     "ai_engineer": "AI Engineer",
     "data_analyst": "Data Analyst",
 }
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# Comma-separated lists are tried in order. Override in Render with GROQ_MODELS / GEMINI_MODELS
+# (or the old single-model GROQ_MODEL / GEMINI_MODEL variables) without touching code.
+def _model_list(plural: str, single: str, default: str) -> list:
+    raw = os.environ.get(plural) or os.environ.get(single) or default
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+GROQ_MODELS = _model_list(
+    "GROQ_MODELS", "GROQ_MODEL",
+    "openai/gpt-oss-120b,qwen/qwen3.6-27b,openai/gpt-oss-20b",
+)
+GEMINI_MODELS = _model_list(
+    "GEMINI_MODELS", "GEMINI_MODEL",
+    "gemini-2.5-flash,gemini-2.5-flash-lite",
+)
+GEMINI_MODEL = GEMINI_MODELS[0]
 
 def read_docx_text(path: Path) -> str:
     if not path.exists():
@@ -91,31 +105,81 @@ RESUME = get_default_resume_text()
 # ---------------------------------------------------------------------
 # LLM providers with failover
 # ---------------------------------------------------------------------
+def _http_error(provider: str, model: str, response) -> str:
+    body = (response.text or "").strip().replace("\n", " ")[:200]
+    return f"{provider}/{model} HTTP {response.status_code}: {body}"
+
+
 def _groq(prompt: str) -> str:
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {GROQ_KEY}"},
-        json={
-            "model": GROQ_MODEL,
-            "temperature": 0.3,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=90,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    errors = []
+    for model in GROQ_MODELS:
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                    json={
+                        "model": model,
+                        "temperature": 0.3,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=90,
+                )
+            except requests.RequestException as exc:
+                errors.append(f"Groq/{model}: {exc}")
+                break
+            if response.ok:
+                content = response.json()["choices"][0]["message"].get("content")
+                if content and content.strip():
+                    return content
+                errors.append(f"Groq/{model}: empty response")
+                break
+            if response.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+                time.sleep(4)
+                continue
+            errors.append(_http_error("Groq", model, response))
+            break  # 404/400/401 etc: move on to the next model
+    raise RuntimeError(" | ".join(errors))
+
+
+def _gemini_request(model: str, payload: dict):
+    """POST to Gemini; retry once on 429/5xx. Returns the final response."""
+    response = None
+    for attempt in range(2):
+        response = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent",
+            headers={"x-goog-api-key": GEMINI_KEY},
+            json=payload,
+            timeout=90,
+        )
+        if response.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+            time.sleep(6)
+            continue
+        break
+    return response
+
+
+def _gemini_call(payload: dict) -> str:
+    errors = []
+    for model in GEMINI_MODELS:
+        try:
+            response = _gemini_request(model, payload)
+        except requests.RequestException as exc:
+            errors.append(f"Gemini/{model}: {exc}")
+            continue
+        if response.ok:
+            try:
+                return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            except (KeyError, IndexError, TypeError):
+                errors.append(f"Gemini/{model}: empty or blocked response")
+                continue
+        errors.append(_http_error("Gemini", model, response))
+    raise RuntimeError(" | ".join(errors))
 
 
 def _gemini(prompt: str) -> str:
-    response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent",
-        headers={"x-goog-api-key": GEMINI_KEY},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=90,
-    )
-    response.raise_for_status()
-    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    return _gemini_call({"contents": [{"parts": [{"text": prompt}]}]})
 
 
 def ask(prompt: str):
@@ -149,36 +213,23 @@ def extract_text_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -
         )
 
     encoded_image = base64.b64encode(image_bytes).decode("ascii")
-    response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent",
-        headers={"x-goog-api-key": GEMINI_KEY},
-        json={
-            "contents": [{
-                "parts": [
-                    {
-                        "text": (
-                            "Read this screenshot carefully and extract all useful text "
-                            "verbatim, especially job title, company, job description, "
-                            "skills, recruiter name, and any email address. Preserve "
-                            "line breaks where useful. Do not guess unreadable text. "
-                            "Return only the extracted text."
-                        )
-                    },
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": encoded_image,
-                        }
-                    },
-                ]
-            }]
-        },
-        timeout=90,
-    )
-    response.raise_for_status()
-    data = response.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    payload = {
+        "contents": [{
+            "parts": [
+                {
+                    "text": (
+                        "Read this screenshot carefully and extract all useful text "
+                        "verbatim, especially job title, company, job description, "
+                        "skills, recruiter name, and any email address. Preserve "
+                        "line breaks where useful. Do not guess unreadable text. "
+                        "Return only the extracted text."
+                    )
+                },
+                {"inline_data": {"mime_type": mime_type, "data": encoded_image}},
+            ]
+        }]
+    }
+    return _gemini_call(payload).strip()
 
 
 
