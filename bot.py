@@ -31,6 +31,14 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from pypdf import PdfReader
 from docx import Document
 import gspread
+import logging
+
+# Show startup/progress in Render's log viewer. httpx logs full Telegram URLs (which
+# contain the bot token), so keep it and httpcore quiet.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+log = logging.getLogger("resume-bot")
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -1519,6 +1527,9 @@ def main() -> None:
 
     if os.environ.get("KEEP_ALIVE", "1") != "0":
         threading.Thread(target=_keep_alive, args=(base_url,), daemon=True).start()
+
+    log.info("Starting webhook server on 0.0.0.0:%s (public URL %s)", port, base_url)
+    log.info("LLM chains: %s", {k: [f"{p}:{m}" for p, m in v] for k, v in CHAINS.items() if k != "chat"})
 
     application.run_webhook(
         listen="0.0.0.0",
