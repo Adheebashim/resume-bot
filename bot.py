@@ -4,7 +4,8 @@ import json
 import time
 import hashlib
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+import threading
 import io
 import base64
 import requests
@@ -172,6 +173,77 @@ def _cooldown_for(err: LLMError) -> int:
     return 0
 
 
+_usage: dict = {}   # (provider, model) -> {"day", "calls", "tokens", "hdr"}
+
+
+def _day_key(provider: str) -> str:
+    """Gemini's daily quota resets at midnight Pacific; Groq's at 00:00 UTC."""
+    tz = timezone.utc
+    if provider == "gemini":
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("America/Los_Angeles")
+        except Exception:
+            tz = timezone(timedelta(hours=-8))
+    return datetime.now(tz).strftime("%Y-%m-%d")
+
+
+def _record(provider: str, model: str, tokens, headers=None) -> None:
+    day = _day_key(provider)
+    u = _usage.get((provider, model))
+    if not u or u["day"] != day:
+        u = {"day": day, "calls": 0, "tokens": 0, "hdr": {}}
+        _usage[(provider, model)] = u
+    u["calls"] += 1
+    u["tokens"] += int(tokens or 0)
+    if headers:
+        for k in ("x-ratelimit-remaining-requests", "x-ratelimit-remaining-tokens",
+                  "x-ratelimit-limit-requests", "x-ratelimit-limit-tokens"):
+            if headers.get(k):
+                u["hdr"][k] = headers.get(k)
+
+
+def _fmt_tokens(n: int) -> str:
+    return f"{n/1000:.1f}k" if n >= 1000 else str(n)
+
+
+def usage_report() -> str:
+    """Human-readable LLM usage for /quota. Counts reset when the bot restarts."""
+    now = time.time()
+    lines = ["📊 LLM usage today (counted since the bot last started)"]
+    any_rows = False
+    for provider, title in (("gemini", "Gemini · day resets midnight Pacific"),
+                            ("groq", "Groq · day resets 00:00 UTC")):
+        models = []
+        for chain in CHAINS.values():
+            for p, m in chain:
+                if p == provider and m not in models:
+                    models.append(m)
+        rows = []
+        for m in models:
+            u = _usage.get((provider, m))
+            if u and u["day"] != _day_key(provider):
+                u = None
+            paused = _cooldown.get((provider, m), 0) - now
+            if not u and paused <= 0:
+                continue
+            text = f"• {m}: " + (f"{u['calls']} call{'s' if u['calls'] != 1 else ''}, {_fmt_tokens(u['tokens'])} tokens" if u else "no calls")
+            if u and u["hdr"].get("x-ratelimit-remaining-requests"):
+                text += f" · {u['hdr']['x-ratelimit-remaining-requests']} requests left today"
+            if u and u["hdr"].get("x-ratelimit-remaining-tokens"):
+                text += f" · {u['hdr']['x-ratelimit-remaining-tokens']} tokens left this minute"
+            if paused > 0:
+                text += f" · ⏸ paused ~{max(1, int(paused // 60))} min (limit hit)"
+            rows.append(text)
+        if rows:
+            any_rows = True
+            lines += ["", title] + rows
+    if not any_rows:
+        lines += ["", "No AI calls yet today."]
+    lines += ["", "Gemini doesn't report remaining quota; see the usage page in Google AI Studio for exact limits."]
+    return "\n".join(lines)
+
+
 def _clean(text: str, limit: int) -> str:
     """Collapse whitespace/blank lines and cap length: fewer input tokens, same meaning."""
     text = re.sub(r"[ \t\u00a0]+", " ", text or "")
@@ -208,7 +280,9 @@ def _gemini_once(model: str, task: str, prompt: str, json_mode: bool, image, opt
         raise LLMError(0, f"gemini/{model}: {exc}")
     if not r.ok:
         raise _err("gemini", model, r)
-    cand = (r.json().get("candidates") or [{}])[0]
+    data = r.json()
+    _record("gemini", model, (data.get("usageMetadata") or {}).get("totalTokenCount"))
+    cand = (data.get("candidates") or [{}])[0]
     text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []) if not p.get("thought"))
     if cand.get("finishReason") == "MAX_TOKENS" and json_mode:
         raise LLMError(0, f"gemini/{model}: output truncated")
@@ -238,7 +312,9 @@ def _groq_once(model: str, task: str, prompt: str, json_mode: bool, optional: bo
         raise LLMError(0, f"groq/{model}: {exc}")
     if not r.ok:
         raise _err("groq", model, r)
-    choice = r.json()["choices"][0]
+    data = r.json()
+    _record("groq", model, (data.get("usage") or {}).get("total_tokens"), r.headers)
+    choice = data["choices"][0]
     text = choice["message"].get("content") or ""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
     if choice.get("finish_reason") == "length" and json_mode:
@@ -552,6 +628,22 @@ def update_application_status(row_number, status: str):
     if worksheet is not None:
         # Application Status is column G.
         worksheet.update_cell(int(row_number), 7, status)
+
+
+def update_application_row(row_number, role=None, resume_used=None, fit_score=None, filename=None):
+    """Update changed cells after a template switch (C=role, D=resume, F=fit, I=filename)."""
+    if not row_number:
+        return
+    worksheet = get_tracking_worksheet()
+    if worksheet is None:
+        return
+    row = int(row_number)
+    updates = []
+    for col, value in (("C", role), ("D", resume_used), ("F", fit_score), ("I", filename)):
+        if value is not None:
+            updates.append({"range": f"{col}{row}", "values": [[value]]})
+    if updates:
+        worksheet.batch_update(updates, value_input_option="USER_ENTERED")
 
 
 # ---------------------------------------------------------------------
@@ -979,6 +1071,25 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+def sheet_url():
+    return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit" if GOOGLE_SHEET_ID else None
+
+
+async def sheet_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or update.effective_user.id != OWNER or not update.effective_message:
+        return
+    url = sheet_url()
+    await update.effective_message.reply_text(
+        f"📋 Your applications sheet:\n{url}" if url else "Sheet tracking isn't set up (GOOGLE_SHEET_ID is missing)."
+    )
+
+
+async def quota_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or update.effective_user.id != OWNER or not update.effective_message:
+        return
+    await update.effective_message.reply_text(usage_report())
+
+
 async def use_default_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or update.effective_user.id != OWNER:
         return
@@ -1035,8 +1146,36 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "• Send a public job-post link or upload a screenshot — I'll extract available text.\n"
             "• If the recruiter email is missing, I'll ask you for it.\n"
             "• I'll create a tailored PDF and show a simple job-fit score out of 10.\n"
-            "• I'll email it only after you press the Send button."
+            "• I'll email it only after you press the Send button.\n"
+            "• Under each PDF, tap another template to regenerate it with that one.\n"
+            "• /sheet (or just type \"sheet\") — link to your tracking sheet.\n"
+            "• /quota (or \"quota\") — AI usage today."
         )
+
+
+def _make_filename(template_role: str, company: str, role: str = "") -> str:
+    return f"Adheeb_{safe_filename(ROLE_LABELS.get(template_role, role or 'Tailored_Resume'))}_{safe_filename(company) if company else 'Application'}.pdf"
+
+
+def _make_caption(role: str, company: str, resume_used: str, fit_10, template_role: str) -> str:
+    return (
+        f"{role or ROLE_LABELS.get(template_role, 'Role not identified')} · {company or 'Company not identified'}\n"
+        f"Resume used: {resume_used}\n"
+        f"Job fit: {fit_10}/10"
+    )[:1000]
+
+
+def _approval_keyboard(key: str, template_role, switchable: bool) -> InlineKeyboardMarkup:
+    rows = [[
+        InlineKeyboardButton("Send resume", callback_data=f"send:{key}"),
+        InlineKeyboardButton("Cancel", callback_data=f"no:{key}"),
+    ]]
+    if switchable and template_role in ROLE_LABELS:
+        rows.append([
+            InlineKeyboardButton(f"↻ {label}", callback_data=f"sw_{role_key}:{key}")
+            for role_key, label in ROLE_LABELS.items() if role_key != template_role
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
 async def process_job_posting(
@@ -1098,7 +1237,7 @@ async def process_job_posting(
         await status.edit_text(f"Sorry, I couldn't generate the resume: {str(exc)[:900]}")
         return
 
-    filename = f"Adheeb_{safe_filename(ROLE_LABELS.get(template_role, role or 'Tailored_Resume'))}_{safe_filename(company) if company else 'Application'}.pdf"
+    filename = _make_filename(template_role, company, role)
     subject_role = role or ROLE_LABELS.get(template_role, "Job")
     subject_company = f" | {company}" if company else ""
     subject = f"Adheeb Ashim | Application for {subject_role}{subject_company}"
@@ -1130,16 +1269,12 @@ async def process_job_posting(
         "role": role or ROLE_LABELS.get(template_role, ""), "company": company,
         "resume_used": resume_used, "fit_score_10": fit_score_10,
         "sheet_row": sheet_row,
+        # Kept so the template can be switched with one tap (template resumes only).
+        "job_text": job_text, "company_ctx": company_ctx, "role_raw": role,
+        "template_role": None if uploaded_text else template_role,
     }
-    caption = (
-        f"{role or ROLE_LABELS.get(template_role, 'Role not identified')} · {company or 'Company not identified'}\n"
-        f"Resume used: {resume_used}\n"
-        f"Job fit: {fit_score_10}/10"
-    )[:1000]
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Send resume", callback_data=f"send:{key}"),
-        InlineKeyboardButton("Cancel", callback_data=f"no:{key}"),
-    ]])
+    caption = _make_caption(role, company, resume_used, fit_score_10, template_role)
+    keyboard = _approval_keyboard(key, None if uploaded_text else template_role, not uploaded_text)
     await status.delete()
     await message.reply_document(
         document=io.BytesIO(pdf), filename=filename, caption=caption, reply_markup=keyboard,
@@ -1153,6 +1288,16 @@ async def on_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     text = message.text.strip()
+
+    # Quick keywords (also available as /sheet and /quota).
+    lowered = text.lower()
+    if len(lowered) <= 40:
+        if "sheet" in lowered:
+            await sheet_command(update, ctx)
+            return
+        if any(w in lowered for w in ("quota", "tokens", "usage")):
+            await quota_command(update, ctx)
+            return
 
     # If the bot previously asked for an email, treat this message as the email.
     pending_job = ctx.user_data.get("pending_job_text")
@@ -1276,6 +1421,53 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await query.message.reply_text(f"Resume sent to {item['to']}.")
         except Exception as exc:
             await query.message.reply_text(f"Email failed: {exc}")
+    elif action.startswith("sw_"):
+        new_role = action[3:]
+        if new_role not in TEMPLATES or not item.get("template_role") or not item.get("job_text"):
+            await query.message.reply_text("I can't switch the template for this request.")
+            return
+        if new_role == item["template_role"]:
+            await query.message.reply_text("That template is already in use.")
+            return
+        status = await query.message.reply_text(f"Switching to the {ROLE_LABELS[new_role]} template…")
+        try:
+            docx_bytes, fit = tailor_docx(new_role, item["job_text"], item.get("company_ctx", ""), {})
+            if fit is None:
+                fit = decide(item["job_text"], "", read_docx_text(TEMPLATES[new_role])).get("fit_score", 0)
+            pdf = docx_to_pdf(docx_bytes)
+        except Exception as exc:
+            await status.edit_text(f"Couldn't switch template: {str(exc)[:600]}")
+            return
+        company = item.get("company", "")
+        role_shown = item.get("role_raw") or ROLE_LABELS[new_role]
+        fit_10 = round(float(fit) / 10, 1)
+        item.update({
+            "pdf": pdf,
+            "template_role": new_role,
+            "resume_used": ROLE_LABELS[new_role],
+            "fit_score_10": fit_10,
+            "role": role_shown,
+            "filename": _make_filename(new_role, company, item.get("role_raw", "")),
+            "subject": f"Adheeb Ashim | Application for {role_shown}" + (f" | {company}" if company else ""),
+        })
+        try:
+            update_application_row(
+                item.get("sheet_row"),
+                role=None if item.get("role_raw") else role_shown,
+                resume_used=item["resume_used"], fit_score=f"{fit_10}/10", filename=item["filename"],
+            )
+        except Exception as sheet_exc:
+            print(f"Google Sheets update failed: {sheet_exc}")
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await status.delete()
+        await query.message.reply_document(
+            document=io.BytesIO(pdf), filename=item["filename"],
+            caption=_make_caption(item.get("role_raw", ""), company, item["resume_used"], fit_10, new_role),
+            reply_markup=_approval_keyboard(key, new_role, True),
+        )
     elif action == "no":
         try:
             update_application_status(item.get("sheet_row"), "Cancelled")
@@ -1290,6 +1482,17 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------
 # Application startup
 # ---------------------------------------------------------------------
+def _keep_alive(base_url: str) -> None:
+    """Ping our own public URL so Render's free tier doesn't spin the bot down after 15 idle minutes."""
+    interval = max(60, int(os.environ.get("KEEP_ALIVE_SECONDS", "600")))
+    while True:
+        time.sleep(interval)
+        try:
+            requests.get(base_url + "/", timeout=20)
+        except Exception:
+            pass
+
+
 def main() -> None:
     # Render Web Service should provide RENDER_EXTERNAL_URL and PORT.
     base_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
@@ -1305,12 +1508,17 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("use_default", use_default_resume))
+    application.add_handler(CommandHandler("sheet", sheet_command))
+    application.add_handler(CommandHandler("quota", quota_command))
     application.add_handler(MessageHandler(filters.Document.PDF | (filters.Document.ALL), on_document))
     application.add_handler(MessageHandler(filters.PHOTO, on_photo))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, on_msg)
     )
     application.add_handler(CallbackQueryHandler(on_button))
+
+    if os.environ.get("KEEP_ALIVE", "1") != "0":
+        threading.Thread(target=_keep_alive, args=(base_url,), daemon=True).start()
 
     application.run_webhook(
         listen="0.0.0.0",
