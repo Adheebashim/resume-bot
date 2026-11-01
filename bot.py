@@ -106,6 +106,7 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "• I'll email it only after you press Send.\n"
             "• Under each PDF, tap another template to regenerate it with that one.\n"
             "• /sheet — link to your tracking sheet.\n"
+            "• /dashboard — link to your live dashboard.\n"
             "• /quota — AI usage today.\n"
             "• /alerts — scan for fresh matching jobs with recruiter emails.\n"
             "• /outreach — draft a LinkedIn cold-outreach or referral message."
@@ -118,6 +119,18 @@ async def sheet_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     url = sheet_url()
     await update.effective_message.reply_text(
         f"📋 Your applications sheet:\n{url}" if url else "Sheet tracking isn't set up (GOOGLE_SHEET_ID is missing)."
+    )
+
+
+async def dashboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the owner the live Web Dashboard link."""
+    if not update.effective_user or update.effective_user.id != OWNER or not update.effective_message:
+        return
+    if not BASE_URL:
+        await update.effective_message.reply_text("The dashboard isn't available (RENDER_EXTERNAL_URL is missing).")
+        return
+    await update.effective_message.reply_text(
+        f"🖥️ Live dashboard:\n{BASE_URL}/\n\nYou can view stats, run scans, and tweak settings there."
     )
 
 
@@ -676,6 +689,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("use_default", use_default_resume))
     application.add_handler(CommandHandler("sheet", sheet_command))
+    application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("quota", quota_command))
     application.add_handler(CommandHandler("alerts", alerts_command))
     application.add_handler(CommandHandler("outreach", outreach_command))
