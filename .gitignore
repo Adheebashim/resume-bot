@@ -5,3 +5,4 @@ __pycache__/
 venv/
 .env
 config/.env
+config/runtime_settings.json
