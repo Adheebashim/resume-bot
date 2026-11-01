@@ -734,8 +734,8 @@ class StatusApiHandler(tornado.web.RequestHandler):
         self.write({
             "status": "online",
             "uptime_sec": time.time() - STATS["start_time"],
-            "processed_jobs": STATS["processed_jobs"],
-            "emails_sent": STATS["emails_sent"],
+            "processed_jobs": len(STATS["job_events"]),
+            "emails_sent": len(STATS["email_events"]),
             "last_job": STATS["last_job"],
             "settings": dict(RUNTIME_SETTINGS),
         })

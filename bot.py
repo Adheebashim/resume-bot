@@ -62,7 +62,18 @@ from modules.job_matching import run_job_scan, format_job_alerts
 import tornado.ioloop
 import tornado.web
 from modules.settings_store import apply_persisted_settings
-from modules.web_dashboard import create_dashboard_app, log_job_processed, log_email_sent
+from modules.web_dashboard import (
+    create_dashboard_app,
+    log_job_processed,
+    log_email_sent,
+    DashboardHandler,
+    StatusApiHandler,
+    SettingsApiHandler,
+    TriggerScanApiHandler,
+    TestProvidersApiHandler,
+)
+import telegram.ext._updater as _ptb_updater
+from telegram.ext._utils.webhookhandler import WebhookAppClass as _WebhookAppClass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 for _noisy in ("httpx", "httpcore"):
@@ -651,6 +662,32 @@ def _keep_alive(base_url: str) -> None:
             pass
 
 
+# ---------------------------------------------------------------------
+# Web Dashboard: attach routes to PTB's internal Tornado app
+# ---------------------------------------------------------------------
+# PTB 21.x builds its webhook Tornado app (WebhookAppClass) internally during
+# start_webhook and exposes no public hook for extra routes. Subclass it and
+# swap it into the module so the dashboard shares the same server/port as the
+# webhook.
+DASHBOARD_HANDLERS = [
+    (r"/", DashboardHandler),
+    (r"/api/status", StatusApiHandler),
+    (r"/api/settings", SettingsApiHandler),
+    (r"/api/trigger-scan", TriggerScanApiHandler),
+    (r"/api/test-providers", TestProvidersApiHandler),
+]
+
+
+class _DashboardWebhookApp(_WebhookAppClass):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_handlers(r".*", DASHBOARD_HANDLERS)
+        log.info("Web Dashboard registered at %s/", BASE_URL)
+
+
+_ptb_updater.WebhookAppClass = _DashboardWebhookApp
+
+
 def main() -> None:
     if not BASE_URL:
         raise RuntimeError(
@@ -666,24 +703,6 @@ def main() -> None:
         log.warning("Could not load persisted settings: %s", exc)
 
     application = ApplicationBuilder().token(TOKEN).build()
-
-    # Attach Web Dashboard handlers to PTB's Tornado server
-    if hasattr(application.updater, "web_app") and application.updater.web_app:
-        from modules.web_dashboard import (
-            DashboardHandler,
-            StatusApiHandler,
-            SettingsApiHandler,
-            TriggerScanApiHandler,
-            TestProvidersApiHandler,
-        )
-        application.updater.web_app.add_handlers(r".*", [
-            (r"/", DashboardHandler),
-            (r"/api/status", StatusApiHandler),
-            (r"/api/settings", SettingsApiHandler),
-            (r"/api/trigger-scan", TriggerScanApiHandler),
-            (r"/api/test-providers", TestProvidersApiHandler),
-        ])
-        log.info("Web Dashboard registered at %s/", BASE_URL)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("use_default", use_default_resume))
