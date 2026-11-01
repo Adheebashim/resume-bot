@@ -1,0 +1,71 @@
+ADHEEB ASHIM
+Data Analyst | Operations Analytics | Process Automation | BI & Reporting
+
+Location: Nilambur, Kerala (Open to Relocate)
+Phone: +91 8281759103 / +91 7306134684
+Email: adheebashim1010@gmail.com
+LinkedIn: https://www.linkedin.com/in/adheeb-hashim/
+GitHub: https://github.com/Adheebashim
+Portfolio: https://adheebashim.dev/
+
+SUMMARY
+Results-driven Data Analyst with 2 years of experience delivering enterprise-scale analytics, reporting automation, and data quality operations at NielsenIQ — managing data for global brands including L'Oréal and Coty. Skilled in SQL, Python, Power BI, and Excel VBA with a proven track record of reducing manual effort by 60% and maintaining 99% data accuracy across 100K+ records. Actively expanding into AI-augmented analytics through RAG systems, LLM-powered workflows, and generative AI tooling.
+
+EXPERIENCE
+
+Data Analyst — NielsenIQ, Chennai, India | Jul 2024 – Present
+- Manage and validate enterprise-scale retail and beauty datasets for global brands including L'Oréal and Coty, maintaining 99% data accuracy across 100K+ records through rigorous QA protocols.
+- Automated 20+ recurring Excel reports using Power Query, VLOOKUP, and PivotTables — reducing manual effort by 60% and accelerating reporting cycles for cross-functional stakeholders.
+- Built an Excel VBA macro tool to split and standardise large datasets (100K+ rows), cutting processing time from hours to minutes and improving team throughput by ~3×.
+- Developed a VBA macro to automate retailer trend checking, enabling faster identification of sales pattern deviations and reducing manual review effort significantly.
+- Investigated data anomalies and performed root-cause analysis, implementing remediation steps to improve consistency and downstream reliability across deliverables.
+- Consolidated 10+ disparate data sources into Power BI dashboards for senior stakeholders, improving self-serve reporting and cross-functional data accessibility.
+- Built a Power Apps Attendance Tracker with real-time data entry, automated alerts, and missing-record detection — centralising HR analytics and improving compliance.
+- Coordinated with cross-functional and cross-time-zone teams to execute SOPs and ensure on-time, high-quality client deliverables.
+
+Data Research & Development Intern — Vyza Solutions, Hyderabad, India | Dec 2023 – Jun 2024
+- Contributed to AI-driven automation initiatives for SaaS workflows, supporting LLM-powered chatbot development, NLP workflow design, and prompt testing.
+- Created and maintained technical documentation for automation workflows, improving team clarity and coordination.
+- Tested and validated updated operational procedures before production deployment, developing foundational QA and governance skills.
+
+PROJECTS
+
+Naukri Job Market Analysis
+Technologies: Python, BeautifulSoup, Pandas, Power BI
+- Scraped 1,000+ job listings using BeautifulSoup; built a structured dataset capturing role, location, salary, and company data for fresh graduates.
+- Cleaned and analysed data in Python to surface hiring hotspots, salary trends, and in-demand skills; delivered an interactive Power BI dashboard for stakeholder use.
+
+AI-Powered Resume Optimizer
+Technologies: Python, Generative AI, Prompt Engineering, LLM
+- Built an ATS optimisation platform that analyses resumes against job descriptions using LLM inference and structured prompt engineering.
+- Designed modular prompt pipelines for AI-generated resume enhancement, cover letter writing, and personalised cold email generation.
+
+SKILLS
+Analytics & Data: SQL, Data Validation/QA, Root Cause Analysis, Trend Analysis, KPI & Exception Reporting
+Tools & Platforms: Excel (Power Query, PivotTables, VLOOKUP), Excel VBA/Macros, Power BI, Power Apps, Python (Pandas, NumPy, Matplotlib)
+AI & Automation: LLM-Powered Workflows, RAG Pipelines, Generative AI, Prompt Engineering, Chatbot & NLP Automation
+Operational Delivery: SOP Execution, Process Improvement, QA/Governance, Stakeholder Coordination, Technical Documentation
+
+EDUCATION
+M.Sc. Data Science — Chandigarh University | 2024–2026
+B.Sc. Statistics — Sree Sankara College, Kalady — MG University | 2019–2022
+
+CERTIFICATIONS
+- Databricks — Building Retrieval Agents on Databricks (2026)
+- Databricks — Generative AI Fundamentals (2026)
+- Udacity — AWS AI Practitioner Challenge (2026)
+- Google — Data Analytics Professional Certificate
+- Dubai One Million Prompters Initiative — Prompt Engineering & Generative AI
+- IBM — Python 101 for Data Science
+- Accenture — Data Analytics & Visualisation Virtual Experience
+
+LINKS FOR PDF HYPERLINKS
+LinkedIn display text: LinkedIn
+LinkedIn URL: https://www.linkedin.com/in/adheeb-hashim/
+GitHub display text: GitHub
+GitHub URL: https://github.com/Adheebashim
+Portfolio display text: Portfolio
+Portfolio URL: https://adheebashim.dev/
+
+NOTE FOR PDF GENERATION
+Use the three URLs above as hyperlink targets for the displayed words “LinkedIn”, “GitHub”, and “Portfolio” in the generated PDF. Do not print placeholder link text.

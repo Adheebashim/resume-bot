@@ -1,0 +1,5 @@
+{
+  "ALERT_INTERVAL_MIN": 10,
+  "ALERT_MAX_RESULTS": 6,
+  "JOB_SCAN_LOOP": true
+}

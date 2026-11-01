@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: adheeb-resume-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      # NEW: Inception Labs API (10B free tokens, used first for most tasks)
+      - key: INCEPTION_API_KEY
+        sync: false
+      - key: GMAIL_CLIENT_ID
+        sync: false
+      - key: GMAIL_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: GMAIL_SENDER
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_SHEET_TAB
+        value: Applications
+      # Job alerts frequency (minutes between scans; default 15)
+      - key: ALERT_INTERVAL_MIN
+        value: "15"
+      # Set to 0 to disable the background job-scan loop
+      - key: JOB_SCAN_LOOP
+        value: "1"
