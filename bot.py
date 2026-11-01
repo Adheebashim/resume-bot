@@ -3,6 +3,7 @@ Resume Bot v2 - Modular, with Inception LLM provider, smart routing,
 personalized emails + cover letters, smart job matching, and recruiter outreach drafting.
 """
 
+import asyncio
 import io
 import logging
 import os
@@ -59,6 +60,7 @@ from modules.utils import (
 )
 from modules.conversation import interactive_reply
 from modules.job_matching import run_job_scan, format_job_alerts
+from modules.recruiter import detect_recruiter, draft_outreach, format_outreach_message
 import tornado.ioloop
 import tornado.web
 from modules.settings_store import apply_persisted_settings
@@ -81,6 +83,7 @@ for _noisy in ("httpx", "httpcore"):
 log = logging.getLogger("resume-bot")
 
 RESUME = get_default_resume_text()
+_MAIN_LOOP = None
 
 
 # ---------------------------------------------------------------------
@@ -370,6 +373,137 @@ def _approval_keyboard(key: str, template_role, switchable: bool) -> InlineKeybo
     return InlineKeyboardMarkup(rows)
 
 
+async def _process_and_draft(
+    bot,
+    job_text: str,
+    recipient: str,
+    source: str = "Job description",
+    bot_data: dict = None,
+    owner_chat_id: int = None,
+    is_proactive: bool = False,
+    reply_to_message=None,
+) -> None:
+    """Core application drafting logic shared between user input and automated scans."""
+    try:
+        info = extract(job_text)
+        company = str(info.get("company", "") or "").strip()
+        role = str(info.get("role", "") or "").strip()
+        template_role = info.get("template_role", "data_analyst")
+        if template_role not in TEMPLATES:
+            template_role = "data_analyst"
+        company_ctx = research(company)
+
+        if not TEMPLATES[template_role].exists():
+            raise FileNotFoundError(
+                f"Missing template {TEMPLATES[template_role]}. Add templates to templates/ folder."
+            )
+
+        docx_bytes, fit = tailor_docx(template_role, job_text, company_ctx, {})
+        if fit is None:
+            fit = decide(job_text, company_ctx, read_docx_text(TEMPLATES[template_role])).get("fit_score", 0)
+        decision = {"fit_score": fit}
+        pdf = docx_to_pdf(docx_bytes)
+        template_label = ROLE_LABELS[template_role]
+
+        # Cover letter + email body
+        resume_for_letter = read_docx_text(TEMPLATES[template_role])
+        cover_letter_text = generate_cover_letter(
+            role=role or ROLE_LABELS.get(template_role, "the role"),
+            company=company,
+            jd=job_text,
+            resume_text=resume_for_letter,
+            company_ctx=company_ctx,
+        )
+        email_body = generate_email_body(
+            role=role or ROLE_LABELS.get(template_role, "the role"),
+            company=company,
+            jd_summary=job_text[:1500],
+            cover_letter=cover_letter_text,
+        )
+
+        filename = _make_filename(template_role, company, role)
+        subject_role = role or ROLE_LABELS.get(template_role, "Job")
+        subject_company = f" | {company}" if company else ""
+        subject = f"Adheeb Ashim | Application for {subject_role}{subject_company}"
+
+        # Unique key for approval callbacks
+        key = f"auto_{int(time.time()*1000)}_{safe_filename(company)[:8]}"
+        score_100 = decision.get("fit_score", 0)
+        try:
+            fit_score_10 = round(float(score_100) / 10, 1)
+        except (TypeError, ValueError):
+            fit_score_10 = 0.0
+
+        sheet_row = None
+        try:
+            sheet_row = log_application(
+                company=company,
+                role=role or ROLE_LABELS.get(template_role, ""),
+                resume_used=template_label,
+                recipient=recipient,
+                fit_score=f"{fit_score_10}/10",
+                status="Awaiting approval",
+                source=source,
+                filename=filename,
+            )
+            log_job_processed(company=company, role=role or ROLE_LABELS.get(template_role, ""), fit=f"{fit_score_10}/10", status="Awaiting Approval")
+        except Exception as sheet_exc:
+            log_job_processed(company=company, role=role or ROLE_LABELS.get(template_role, ""), fit=f"{fit_score_10}/10", status="Awaiting Approval")
+            print(f"Google Sheets logging failed: {sheet_exc}")
+
+        item_data = {
+            "to": recipient, "pdf": pdf, "subject": subject, "filename": filename,
+            "role": role or ROLE_LABELS.get(template_role, ""), "company": company,
+            "resume_used": template_label, "fit_score_10": fit_score_10,
+            "sheet_row": sheet_row,
+            "job_text": job_text, "company_ctx": company_ctx, "role_raw": role,
+            "template_role": template_role,
+            "email_body": email_body,
+            "cover_letter_text": cover_letter_text,
+        }
+
+        if bot_data is not None:
+            bot_data[key] = item_data
+
+        caption = _make_caption(role, company, template_label, fit_score_10, template_role)
+        cover_note = "\n✉️ Personalized email + cover letter will be included in the email body." if email_body else ""
+        caption = (caption + cover_note)[:1000]
+        keyboard = _approval_keyboard(key, template_role, True)
+
+        if is_proactive:
+            final_caption = f"🎯 Smart Job Match ({source})\n\n{caption}"[:1024]
+            await bot.send_document(
+                chat_id=owner_chat_id or OWNER,
+                document=io.BytesIO(pdf),
+                filename=filename,
+                caption=final_caption,
+                reply_markup=keyboard,
+            )
+        else:
+            final_caption = caption[:1024]
+            if reply_to_message:
+                await reply_to_message.reply_document(
+                    document=io.BytesIO(pdf),
+                    filename=filename,
+                    caption=final_caption,
+                    reply_markup=keyboard,
+                )
+            else:
+                await bot.send_document(
+                    chat_id=owner_chat_id or OWNER,
+                    document=io.BytesIO(pdf),
+                    filename=filename,
+                    caption=final_caption,
+                    reply_markup=keyboard,
+                )
+    except Exception as exc:
+        if is_proactive:
+            log.error("Proactive draft failed: %s", exc)
+        else:
+            log.error("Drafting failed: %s", exc)
+            raise
+
+
 async def process_job_posting(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -393,120 +527,86 @@ async def process_job_posting(
 
     ctx.user_data.pop("pending_job_text", None)
     ctx.user_data.pop("pending_recipient", None)
-    status = await message.reply_text("Analysing the role and tailoring your resume…")
 
-    try:
-        info = extract(job_text)
-        company = str(info.get("company", "") or "").strip()
-        role = str(info.get("role", "") or "").strip()
-        template_role = info.get("template_role", "data_analyst")
-        if template_role not in TEMPLATES:
-            template_role = "data_analyst"
-        company_ctx = research(company)
-
-        uploaded_text = ctx.user_data.get("selected_resume_text") if ctx.user_data.get("selected_resume_source") == "uploaded" else None
-        if uploaded_text:
+    # If using custom resume PDF, we still use the old path for now
+    uploaded_text = ctx.user_data.get("selected_resume_text") if ctx.user_data.get("selected_resume_source") == "uploaded" else None
+    if uploaded_text:
+        # Fall back to the original logic for custom uploaded resumes
+        status = await message.reply_text("Analysing the role and tailoring your resume…")
+        try:
+            info = extract(job_text)
+            company = str(info.get("company", "") or "").strip()
+            role = str(info.get("role", "") or "").strip()
+            company_ctx = research(company)
             decision = decide(job_text, company_ctx, uploaded_text)
             tailored_text, used_model = tailor(job_text, company_ctx, decision, uploaded_text)
             pdf = make_pdf(tailored_text)
             template_label = "Custom uploaded resume"
-        else:
-            if not TEMPLATES[template_role].exists():
-                raise FileNotFoundError(
-                    f"Missing template {TEMPLATES[template_role]}. Add all three Word templates to the GitHub templates/ folder."
-                )
-            docx_bytes, fit = tailor_docx(template_role, job_text, company_ctx, {})
-            if fit is None:
-                fit = decide(job_text, company_ctx, read_docx_text(TEMPLATES[template_role])).get("fit_score", 0)
-            decision = {"fit_score": fit}
-            pdf = docx_to_pdf(docx_bytes)
-            used_model = "smart tiered AI provider"
-            template_label = ROLE_LABELS[template_role]
-        ctx.user_data.pop("selected_resume_text", None)
-        ctx.user_data.pop("selected_resume_source", None)
-    except Exception as exc:
-        await status.edit_text(f"Sorry, I couldn't generate the resume: {str(exc)[:900]}")
+
+            # Cover letter + email body
+            cover_letter_text = generate_cover_letter(
+                role=role or "the role",
+                company=company,
+                jd=job_text,
+                resume_text=uploaded_text,
+                company_ctx=company_ctx,
+            )
+            email_body = generate_email_body(
+                role=role or "the role",
+                company=company,
+                jd_summary=job_text[:1500],
+                cover_letter=cover_letter_text,
+            )
+
+            filename = _make_filename("custom", company, role)
+            subject = f"Adheeb Ashim | Application for {role or 'Job'} | {company}"
+            key = str(message.message_id)
+            fit_score_10 = round(float(decision.get("fit_score", 0)) / 10, 1)
+
+            source = str(ctx.user_data.pop("application_source", "Job description"))
+            sheet_row = None
+            try:
+                sheet_row = log_application(company, role, template_label, recipient, f"{fit_score_10}/10", "Awaiting approval", source, filename)
+                log_job_processed(company, role, f"{fit_score_10}/10", "Awaiting Approval")
+            except Exception as sheet_exc:
+                log_job_processed(company, role, f"{fit_score_10}/10", "Awaiting Approval")
+                print(f"Google Sheets logging failed: {sheet_exc}")
+
+            ctx.bot_data[key] = {
+                "to": recipient, "pdf": pdf, "subject": subject, "filename": filename,
+                "role": role, "company": company, "resume_used": template_label,
+                "fit_score_10": fit_score_10, "sheet_row": sheet_row,
+                "job_text": job_text, "company_ctx": company_ctx, "role_raw": role,
+                "template_role": None, "email_body": email_body, "cover_letter_text": cover_letter_text,
+            }
+            caption = _make_caption(role, company, template_label, fit_score_10, "data_analyst")
+            await status.delete()
+            await message.reply_document(document=io.BytesIO(pdf), filename=filename, caption=caption, reply_markup=_approval_keyboard(key, None, False))
+        except Exception as exc:
+            await status.edit_text(f"Sorry, I couldn't generate the resume: {exc}")
         return
 
-    # Store job context for the /outreach command
-    ctx.user_data["last_job_text"] = job_text[:3000]
-    ctx.user_data["last_company"] = company
-    ctx.user_data["last_role"] = role
-
-    # --- Personalized cover letter + email body (always generated) ---
-    cover_letter_text = ""
-    email_body = ""
-    try:
-        resume_for_letter = None
-        if uploaded_text:
-            resume_for_letter = uploaded_text
-        else:
-            resume_for_letter = read_docx_text(TEMPLATES[template_role])
-        cover_letter_text = generate_cover_letter(
-            role=role or ROLE_LABELS.get(template_role, "the role"),
-            company=company,
-            jd=job_text,
-            resume_text=resume_for_letter,
-            company_ctx=company_ctx,
-        )
-        email_body = generate_email_body(
-            role=role or ROLE_LABELS.get(template_role, "the role"),
-            company=company,
-            jd_summary=job_text[:1500],
-            cover_letter=cover_letter_text,
-        )
-    except Exception as exc:
-        log.warning("Cover letter / email generation failed: %s", exc)
-        email_body = ""
-
-    filename = _make_filename(template_role, company, role)
-    subject_role = role or ROLE_LABELS.get(template_role, "Job")
-    subject_company = f" | {company}" if company else ""
-    subject = f"Adheeb Ashim | Application for {subject_role}{subject_company}"
-    key = str(message.message_id)
-    score_100 = decision.get("fit_score", 0)
-    try:
-        fit_score_10 = round(float(score_100) / 10, 1)
-    except (TypeError, ValueError):
-        fit_score_10 = 0.0
-    resume_used = template_label
+    # For standard templates, use the unified helper
+    status = await message.reply_text("Analysing the role and tailoring your resume…")
     source = str(ctx.user_data.pop("application_source", "Job description"))
     try:
-        sheet_row = log_application(
-            company=company,
-            role=role or ROLE_LABELS.get(template_role, ""),
-            resume_used=resume_used,
+        await _process_and_draft(
+            bot=ctx.bot,
+            job_text=job_text,
             recipient=recipient,
-            fit_score=f"{fit_score_10}/10",
-            status="Awaiting approval",
             source=source,
-            filename=filename,
+            bot_data=ctx.bot_data,
+            owner_chat_id=message.chat_id,
+            is_proactive=False,
+            reply_to_message=message,
         )
-        log_job_processed(company=company, role=role or ROLE_LABELS.get(template_role, ""), fit=f"{fit_score_10}/10", status="Awaiting Approval")
-    except Exception as sheet_exc:
-        sheet_row = None
-        log_job_processed(company=company, role=role or ROLE_LABELS.get(template_role, ""), fit=f"{fit_score_10}/10", status="Awaiting Approval")
-        print(f"Google Sheets logging failed: {sheet_exc}")
-
-    ctx.bot_data[key] = {
-        "to": recipient, "pdf": pdf, "subject": subject, "filename": filename,
-        "role": role or ROLE_LABELS.get(template_role, ""), "company": company,
-        "resume_used": resume_used, "fit_score_10": fit_score_10,
-        "sheet_row": sheet_row,
-        "job_text": job_text, "company_ctx": company_ctx, "role_raw": role,
-        "template_role": None if uploaded_text else template_role,
-        "email_body": email_body,
-        "cover_letter_text": cover_letter_text,
-    }
-
-    caption = _make_caption(role, company, resume_used, fit_score_10, template_role)
-    cover_note = "\n✉️ Personalized email + cover letter will be included in the email body." if email_body else ""
-    caption = (caption + cover_note)[:1000]
-    keyboard = _approval_keyboard(key, None if uploaded_text else template_role, not uploaded_text)
-    await status.delete()
-    await message.reply_document(
-        document=io.BytesIO(pdf), filename=filename, caption=caption, reply_markup=keyboard,
-    )
+    except Exception as exc:
+        await message.reply_text(f"Sorry, I couldn't generate the resume: {exc}")
+    finally:
+        try:
+            await status.delete()
+        except Exception:
+            pass
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -528,6 +628,10 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if action == "send":
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         try:
             body = item.get("email_body")
             send_mail(
@@ -612,6 +716,10 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
     elif action == "no":
         try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
             update_application_status(item.get("sheet_row"), "Cancelled")
         except Exception as sheet_exc:
             print(f"Google Sheets status update failed: {sheet_exc}")
@@ -624,7 +732,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------
 # Background job scanning (respects ALERT_INTERVAL_MIN throttle)
 # ---------------------------------------------------------------------
-def _job_scan_loop() -> None:
+def _job_scan_loop(application) -> None:
     """Continuously scan for matching jobs and send alerts if enabled.
 
     Reads JOB_SCAN_LOOP and ALERT_INTERVAL_MIN from RUNTIME_SETTINGS on every
@@ -641,8 +749,26 @@ def _job_scan_loop() -> None:
         time.sleep(interval_min * 60)
         try:
             jobs = run_job_scan()
+            for job in jobs:
+                if job.get("emails"):
+                    recipient = job["emails"][0]
+                    if _MAIN_LOOP and _MAIN_LOOP.is_running():
+                        coro = _process_and_draft(
+                            application.bot,
+                            f"{job['title']}\n{job['url']}\n{job['snippet']}",
+                            recipient,
+                            source="Background Scan",
+                            bot_data=application.bot_data,
+                            owner_chat_id=OWNER,
+                            is_proactive=True,
+                        )
+                        future = asyncio.run_coroutine_threadsafe(coro, _MAIN_LOOP)
+                        try:
+                            future.result(timeout=120)
+                        except Exception as draft_exc:
+                            log.error("Background draft error: %s", draft_exc)
             if jobs:
-                log.info("Job scan: %d fresh matches found", len(jobs))
+                log.info("Job scan: %d fresh matches found and drafted", len(jobs))
         except Exception as exc:
             log.info("Job scan skipped: %s", exc)
 
@@ -702,7 +828,13 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not load persisted settings: %s", exc)
 
-    application = ApplicationBuilder().token(TOKEN).build()
+    async def post_init(app):
+        global _MAIN_LOOP
+        _MAIN_LOOP = asyncio.get_running_loop()
+        from modules.web_dashboard import set_bot_application
+        set_bot_application(app)
+
+    application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("use_default", use_default_resume))
@@ -721,7 +853,9 @@ def main() -> None:
 
     # Background job scanning (disabled in dev unless JOB_SCAN_LOOP=1)
     # Background job scanning (runtime-controlled from the Web Dashboard)
-    threading.Thread(target=_job_scan_loop, daemon=True).start()
+    from modules.web_dashboard import set_bot_application
+    set_bot_application(application)
+    threading.Thread(target=_job_scan_loop, args=(application,), daemon=True).start()
 
     log.info("Starting webhook server on 0.0.0.0:%s (public URL %s)", PORT, BASE_URL)
     log.info("LLM providers: Inception + Gemini + Groq (smart routing)")

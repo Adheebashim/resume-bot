@@ -9,11 +9,21 @@ import os
 import threading
 from pathlib import Path
 
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env var; fall back to default when unset or empty."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 # --- Telegram / deployment -------------------------------------------------
-TOKEN = os.environ["BOT_TOKEN"]
-OWNER = int(os.environ["OWNER_ID"])
+TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+OWNER = _env_int("OWNER_ID", 0)
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
-PORT = int(os.environ.get("PORT", "10000"))
+PORT = _env_int("PORT", 10000)
 
 # --- LLM API keys ----------------------------------------------------------
 # Inception Labs (10B free tokens, OpenAI-compatible).
@@ -46,9 +56,9 @@ ROLE_LABELS = {
 }
 
 # --- Job alerts & Runtime Controls -----------------------------------------
-ALERT_INTERVAL_MIN = int(os.environ.get("ALERT_INTERVAL_MIN", "15"))
-ALERT_MAX_RESULTS = int(os.environ.get("ALERT_MAX_RESULTS", "6"))
-JOB_SCAN_LOOP = os.environ.get("JOB_SCAN_LOOP", "1") in ("1", "true", "True")
+ALERT_INTERVAL_MIN = _env_int("ALERT_INTERVAL_MIN", 15)
+ALERT_MAX_RESULTS = _env_int("ALERT_MAX_RESULTS", 6)
+JOB_SCAN_LOOP = os.environ.get("JOB_SCAN_LOOP", "1").strip() in ("1", "true", "True")
 
 # Where persisted dashboard settings live (JSON file on disk).
 RUNTIME_SETTINGS_FILE = Path(

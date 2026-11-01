@@ -4,6 +4,7 @@ Generates tailored email bodies with embedded cover letters formatted as clean t
 """
 
 import base64
+import re
 import requests
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
@@ -15,8 +16,44 @@ from config.settings import (
     GMAIL_REFRESH_TOKEN,
     GMAIL_SENDER,
     OWNER_NAME,
+    OWNER_EMAIL,
+    OWNER_PHONE,
+    OWNER_LOCATION,
+    REFERENCE_LINKS,
 )
 from modules.llm_provider import ask
+
+
+def _clean_email_body(text: str, role: str = "", company: str = "", recruiter_name: Optional[str] = None) -> str:
+    """Clean hallucinated locations and substitute any square-bracket placeholders with actual values."""
+    # Remove fabricated city residency like "Being based in Sydney, "
+    text = re.sub(r"\bBeing based in (?!Nilambur|Kerala|India)[^,\.\n]+,\s*", "", text, flags=re.I)
+    text = re.sub(r"\bAs a (?:resident|local) of (?!Nilambur|Kerala|India)[^,\.\n]+,\s*", "", text, flags=re.I)
+    text = re.sub(r"(?<=\n\n)([a-z])", lambda m: m.group(1).upper(), text)
+
+    linkedin_url = REFERENCE_LINKS.get("LinkedIn", "")
+    portfolio_url = REFERENCE_LINKS.get("Portfolio", "")
+
+    # Replace specific bracketed placeholders with real contact info
+    replacements = [
+        (r"\[(?:Your\s*)?Email(?:\s*Address)?\]", OWNER_EMAIL),
+        (r"\[(?:Your\s*)?Phone(?:\s*Number)?\]", OWNER_PHONE),
+        (r"\[(?:Your\s*)?LinkedIn(?:\s*Profile)?(?:\s*URL)?\]", linkedin_url),
+        (r"\[(?:Your\s*)?Portfolio(?:\s*URL)?\]", portfolio_url),
+        (r"\[(?:Your\s*)?GitHub(?:\s*URL)?\]", REFERENCE_LINKS.get("GitHub", "")),
+        (r"\[(?:Your\s*)?Location\]", OWNER_LOCATION),
+        (r"\[(?:Your\s*)?Name\]", OWNER_NAME),
+        (r"\[(?:Insert\s*)?Date\]", ""),
+        (r"\[Company(?:\s*Name)?\]", company),
+        (r"\[(?:Target\s*)?Role\]", role),
+        (r"\[(?:Hiring\s*Manager|Recruiter)(?:\s*Name)?\]", recruiter_name or "Hiring Team"),
+    ]
+    for pat, rep in replacements:
+        text = re.sub(pat, rep, text, flags=re.I)
+
+    # Clean any lingering [Your ...] or [Insert ...] artifacts
+    text = re.sub(r"\[(?:Your|Insert)\s+[^\]]+\]", "", text, flags=re.I)
+    return text.strip()
 
 
 def generate_email_body(
@@ -30,13 +67,28 @@ def generate_email_body(
     Generate a personalized application email body.
     Includes the cover letter formatted naturally into the body text.
     """
+    contact_info = (
+        f"Applicant Name: {OWNER_NAME}\n"
+        f"Applicant Email: {OWNER_EMAIL}\n"
+        f"Applicant Phone: {OWNER_PHONE}\n"
+        f"Applicant Location: {OWNER_LOCATION}\n"
+        f"Applicant LinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
+        f"Applicant Portfolio: {REFERENCE_LINKS.get('Portfolio', '')}\n"
+    )
+
     prompt = (
         f"Write a professional application email to send to a recruiter.\n"
-        f"Applicant Name: {OWNER_NAME}\n"
+        f"{contact_info}\n"
         f"Role: {role}\n"
         f"Company: {company}\n"
         f"Recruiter Name: {recruiter_name or 'Hiring Manager'}\n\n"
         f"Job Details / Requirements:\n{jd_summary[:1500]}\n\n"
+        f"CRITICAL RULES:\n"
+        f"1. LOCATION: The applicant is based in {OWNER_LOCATION}. "
+        f"NEVER state or imply that the applicant is based in, living in, or a local resident of the company's city/country "
+        f"(e.g. NEVER write 'Being based in Sydney' or 'As a resident of...').\n"
+        f"2. NO PLACEHOLDERS: NEVER write bracketed placeholders like [Your Email Address], [Your Phone Number], [Your LinkedIn Profile URL]. "
+        f"Use the actual applicant contact details provided above.\n"
     )
 
     if cover_letter:
@@ -44,19 +96,23 @@ def generate_email_body(
             f"Embed and format this cover letter cleanly inside the email body:\n"
             f"{cover_letter}\n\n"
             "Format: Warm professional greeting, 1 brief intro sentence, then the cover letter text "
-            "formatted with clean line breaks, ending with a polite sign-off mentioning the attached resume."
+            "formatted with clean line breaks, ending with a polite sign-off mentioning the attached resume.\n"
+            f"Signature format:\nWarm regards,\n\n{OWNER_NAME}\n{role or 'Engineer'}\n"
+            f"Email: {OWNER_EMAIL}\nPhone: {OWNER_PHONE}\nLinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
         )
     else:
         prompt += (
             "Write a personalized, concise email (3 short paragraphs) expressing enthusiasm for the role, "
-            "highlighting 2 relevant strengths/achievements aligned with the job, and mentioning the attached resume."
+            "highlighting 2 relevant strengths/achievements aligned with the job, and mentioning the attached resume.\n"
+            f"Signature format:\nWarm regards,\n\n{OWNER_NAME}\n{role or 'Engineer'}\n"
+            f"Email: {OWNER_EMAIL}\nPhone: {OWNER_PHONE}\nLinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
         )
 
     prompt += "\nReturn ONLY the email body text in English. No subject line. No markdown."
 
     try:
         body, _ = ask(prompt, task="email")
-        return body.strip()
+        return _clean_email_body(body, role=role, company=company, recruiter_name=recruiter_name)
     except Exception as exc:
         # Fallback if LLM call fails
         greeting = f"Dear {recruiter_name}," if recruiter_name else "Dear Hiring Team,"
@@ -70,9 +126,13 @@ def generate_email_body(
             fallback += f"{cover_letter}\n\n"
         fallback += (
             f"Please find attached my resume{position}{at_company} for your review.\n\n"
-            f"Best regards,\n{OWNER_NAME}"
+            f"Best regards,\n\n"
+            f"{OWNER_NAME}\n"
+            f"Email: {OWNER_EMAIL}\n"
+            f"Phone: {OWNER_PHONE}\n"
+            f"LinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
         )
-        return fallback
+        return _clean_email_body(fallback, role=role, company=company, recruiter_name=recruiter_name)
 
 
 def send_mail(

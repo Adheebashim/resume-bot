@@ -197,18 +197,32 @@ def run_job_scan(force: bool = False) -> List[Dict]:
             seen.add(title_key)
             unique_jobs.append(job)
 
+    # Filter out already seen jobs across scans (unless force=True)
+    fresh_jobs: List[Dict] = []
+    for job in unique_jobs:
+        dedupe_key = (job.get("url") or job["title"]).lower()[:100]
+        if force or dedupe_key not in _job_state["seen_titles"]:
+            fresh_jobs.append(job)
+            if not force:
+                _job_state["seen_titles"].add(dedupe_key)
+
+    if len(_job_state["seen_titles"]) > 500:
+        _job_state["seen_titles"] = set(list(_job_state["seen_titles"])[-250:])
+
     # Sort by fit relevance (emails present first, then keyword hits)
-    unique_jobs.sort(key=lambda x: (len(x["emails"]), x["keyword_hits"]), reverse=True)
-    unique_jobs = unique_jobs[:max_results]
+    fresh_jobs.sort(key=lambda x: (len(x["emails"]), x["keyword_hits"]), reverse=True)
+    fresh_jobs = fresh_jobs[:max_results]
 
-    # Score top results
-    if unique_jobs:
-        # Score against each role's resume
-        best_role = unique_jobs[0]["role_key"]
-        resume_text = _get_resume_text(best_role)
-        score_jobs(unique_jobs, "", resume_text)
+    # Score top results: each job against its own role's resume
+    if fresh_jobs:
+        by_role = {}
+        for job in fresh_jobs:
+            by_role.setdefault(job["role_key"], []).append(job)
+        for role_key, jobs in by_role.items():
+            resume_text = _get_resume_text(role_key)
+            score_jobs(jobs, "", resume_text)
 
-    return unique_jobs
+    return fresh_jobs
 
 
 def format_job_alerts(jobs: List[Dict]) -> str:

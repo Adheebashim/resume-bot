@@ -28,7 +28,9 @@ from modules.llm_provider import usage_report, _usage, _cooldown, test_providers
 
 log = logging.getLogger("resume-bot.dashboard")
 
-# Shared state for the dashboard
+# Global reference to the PTB application so dashboard endpoints can trigger Telegram messages
+_BOT_APPLICATION = None
+
 STATS = {
     "start_time": time.time(),
     "job_events": [],  # List of timestamps when jobs were processed
@@ -38,6 +40,11 @@ STATS = {
     "scan_running": False,
     "last_scan_result": None,
 }
+
+
+def set_bot_application(app):
+    global _BOT_APPLICATION
+    _BOT_APPLICATION = app
 
 class DashboardHandler(tornado.web.RequestHandler):
     def get(self):
@@ -794,7 +801,7 @@ class SettingsApiHandler(tornado.web.RequestHandler):
 
 class TriggerScanApiHandler(tornado.web.RequestHandler):
     """POST endpoint to run a job scan on demand from the dashboard."""
-    def post(self):
+    async def post(self):
         self.set_header("Content-Type", "application/json")
         if STATS["scan_running"]:
             self.write({"ok": False, "error": "A scan is already running.", "found": 0})
@@ -802,8 +809,26 @@ class TriggerScanApiHandler(tornado.web.RequestHandler):
 
         STATS["scan_running"] = True
         try:
+            import asyncio
             from modules.job_matching import run_job_scan
-            jobs = run_job_scan(force=True)
+            loop = asyncio.get_running_loop()
+            jobs = await loop.run_in_executor(None, run_job_scan, True)
+
+            if _BOT_APPLICATION and jobs:
+                from bot import _process_and_draft
+                for job in jobs:
+                    if job.get("emails"):
+                        recipient = job["emails"][0]
+                        asyncio.create_task(_process_and_draft(
+                            _BOT_APPLICATION.bot,
+                            f"{job['title']}\n{job['url']}\n{job['snippet']}",
+                            recipient,
+                            source="Dashboard Manual Scan",
+                            bot_data=_BOT_APPLICATION.bot_data,
+                            owner_chat_id=int(os.environ.get("OWNER_ID", 0)),
+                            is_proactive=True,
+                        ))
+
             stats = {
                 "found": len(jobs),
                 "count": len(jobs),

@@ -167,17 +167,28 @@ def tailor_docx(template_role: str, jd: str, company_ctx: str, decision: dict):
     )
     output, _model = ask(prompt, task="heavy", json_mode=True)
     data = parse_json(output)
-    replacements = [(sections["summary"], data.get("summary"))]
+    source_map = {
+        "nielsen_bullets": source_nielsen,
+        "intern_bullets": source_intern,
+        "project_bullets": source_projects,
+    }
+    replacements = []
+    summary = str(data.get("summary") or "").strip() or source_summary
+    replacements.append((sections["summary"], summary))
+
     for key, indices in (("nielsen_bullets", sections["nielsen"]),
                          ("intern_bullets", sections["intern"]),
                          ("project_bullets", sections["projects"])):
-        values = data.get(key)
-        if not isinstance(values, list) or len(values) != len(indices) or not all(isinstance(v, str) and v.strip() for v in values):
-            raise ValueError(f"The AI returned an invalid {key} structure. Please retry.")
-        replacements.extend(zip(indices, values))
-    summary = data.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        raise ValueError("The AI did not return a valid resume summary. Please retry.")
+        raw_values = data.get(key)
+        clean_values = []
+        if isinstance(raw_values, list):
+            clean_values = [str(v).strip() for v in raw_values if str(v).strip()]
+        # If fewer bullets returned, pad from original template bullets
+        if len(clean_values) < len(indices):
+            clean_values.extend(source_map[key][len(clean_values):len(indices)])
+        clean_values = clean_values[:len(indices)]
+        replacements.extend(zip(indices, clean_values))
+
     for index, value in replacements:
         _set_paragraph_text(paragraphs[index], value.strip())
     try:

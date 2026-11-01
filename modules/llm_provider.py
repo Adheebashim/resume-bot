@@ -53,9 +53,9 @@ PROVIDER_CONFIG = {
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/models",
         "models": {
-            "light": "gemini-3.5-flash-lite",
-            "heavy": "gemini-3.6-flash",
-            "vision": "gemini-3.5-flash-lite",
+            "light": "gemini-2.0-flash",
+            "heavy": "gemini-2.0-flash",
+            "vision": "gemini-2.0-flash",
         },
         "supports_json": True,
         "supports_vision": True,
@@ -64,8 +64,8 @@ PROVIDER_CONFIG = {
     "groq": {
         "base_url": "https://api.groq.com/openai/v1/chat/completions",
         "models": {
-            "light": "openai/gpt-oss-20b",
-            "heavy": "openai/gpt-oss-120b",
+            "light": "llama-3.1-8b-instant",
+            "heavy": "llama-3.3-70b-versatile",
             "vision": None,
         },
         "supports_json": True,
@@ -188,14 +188,8 @@ def _inception_once(model: str, task: str, prompt: str, json_mode: bool, optiona
 def _gemini_once(model: str, task: str, prompt: str, json_mode: bool, image, optional: bool) -> str:
     """Call Gemini API."""
     gen = {"temperature": 0.3, "maxOutputTokens": MAX_OUT[task]}
-    if optional:
-        if json_mode:
-            gen["responseMimeType"] = "application/json"
-        heavy = task in ("heavy", "email", "cover_letter")
-        if model.startswith("gemini-2.5"):
-            gen["thinkingConfig"] = {"thinkingBudget": 1024 if heavy else 0}
-        else:
-            gen["thinkingConfig"] = {"thinkingLevel": "low" if heavy else "minimal"}
+    if optional and json_mode:
+        gen["responseMimeType"] = "application/json"
 
     parts = [{"text": prompt}]
     if image:
@@ -231,14 +225,11 @@ def _groq_once(model: str, task: str, prompt: str, json_mode: bool, optional: bo
     body = {
         "model": model,
         "temperature": 0.3,
-        "max_completion_tokens": MAX_OUT[task],
+        "max_tokens": MAX_OUT[task],
         "messages": [{"role": "user", "content": prompt}],
     }
-    if optional:
-        if model.startswith("openai/gpt-oss"):
-            body["reasoning_effort"] = "low"
-        if json_mode:
-            body["response_format"] = {"type": "json_object"}
+    if optional and json_mode:
+        body["response_format"] = {"type": "json_object"}
 
     try:
         r = requests.post(
