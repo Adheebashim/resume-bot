@@ -665,26 +665,25 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not load persisted settings: %s", exc)
 
-    async def post_init(app):
-        # Attach Web Dashboard handlers to PTB's Tornado server
-        if hasattr(app.updater, "web_app") and app.updater.web_app:
-            from modules.web_dashboard import (
-                DashboardHandler,
-                StatusApiHandler,
-                SettingsApiHandler,
-                TriggerScanApiHandler,
-                TestProvidersApiHandler,
-            )
-            app.updater.web_app.add_handlers(r".*", [
-                (r"/", DashboardHandler),
-                (r"/api/status", StatusApiHandler),
-                (r"/api/settings", SettingsApiHandler),
-                (r"/api/trigger-scan", TriggerScanApiHandler),
-                (r"/api/test-providers", TestProvidersApiHandler),
-            ])
-            log.info("Web Dashboard registered at %s/", BASE_URL)
+    application = ApplicationBuilder().token(TOKEN).build()
 
-    application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    # Attach Web Dashboard handlers to PTB's Tornado server
+    if hasattr(application.updater, "web_app") and application.updater.web_app:
+        from modules.web_dashboard import (
+            DashboardHandler,
+            StatusApiHandler,
+            SettingsApiHandler,
+            TriggerScanApiHandler,
+            TestProvidersApiHandler,
+        )
+        application.updater.web_app.add_handlers(r".*", [
+            (r"/", DashboardHandler),
+            (r"/api/status", StatusApiHandler),
+            (r"/api/settings", SettingsApiHandler),
+            (r"/api/trigger-scan", TriggerScanApiHandler),
+            (r"/api/test-providers", TestProvidersApiHandler),
+        ])
+        log.info("Web Dashboard registered at %s/", BASE_URL)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("use_default", use_default_resume))
