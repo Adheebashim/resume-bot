@@ -361,16 +361,44 @@ def _make_caption(role: str, company: str, resume_used: str, fit_10, template_ro
 
 
 def _approval_keyboard(key: str, template_role, switchable: bool) -> InlineKeyboardMarkup:
-    rows = [[
-        InlineKeyboardButton("Send resume", callback_data=f"send:{key}"),
-        InlineKeyboardButton("Cancel", callback_data=f"no:{key}"),
-    ]]
+    rows = [
+        [
+            InlineKeyboardButton("✅ Approve & send", callback_data=f"send:{key}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"no:{key}"),
+        ],
+        [InlineKeyboardButton("✍️ Rewrite email", callback_data=f"rw:{key}")],
+    ]
     if switchable and template_role in ROLE_LABELS:
         rows.append([
             InlineKeyboardButton(f"↻ {label}", callback_data=f"sw_{role_key}:{key}")
             for role_key, label in ROLE_LABELS.items() if role_key != template_role
         ])
     return InlineKeyboardMarkup(rows)
+
+
+def _email_review_text(item: dict) -> str:
+    """The exact email the recruiter will receive, shown for approval."""
+    body = item.get("email_body") or "(No custom body — a short default email will be sent.)"
+    text = (
+        "✉️ Email draft — please review\n\n"
+        f"To: {item.get('to', '')}\n"
+        f"Subject: {item.get('subject', '')}\n"
+        f"Attachment: {item.get('filename', '')}\n"
+        "──────────────\n\n"
+        f"{body}\n\n"
+        "──────────────\n"
+        "Nothing is sent until you tap Approve & send."
+    )
+    return text[:4000]
+
+
+async def _send_email_review(bot, chat_id, key: str, item: dict) -> None:
+    """Send the email draft to the owner with the approval buttons under it."""
+    await bot.send_message(
+        chat_id=chat_id,
+        text=_email_review_text(item),
+        reply_markup=_approval_keyboard(key, item.get("template_role"), bool(item.get("template_role"))),
+    )
 
 
 async def _process_and_draft(
@@ -460,42 +488,23 @@ async def _process_and_draft(
             "template_role": template_role,
             "email_body": email_body,
             "cover_letter_text": cover_letter_text,
+            "resume_text": resume_for_letter,
         }
 
         if bot_data is not None:
             bot_data[key] = item_data
 
-        caption = _make_caption(role, company, template_label, fit_score_10, template_role)
-        cover_note = "\n✉️ Personalized email + cover letter will be included in the email body." if email_body else ""
-        caption = (caption + cover_note)[:1000]
-        keyboard = _approval_keyboard(key, template_role, True)
-
+        caption = _make_caption(role, company, template_label, fit_score_10, template_role)[:1024]
         if is_proactive:
-            final_caption = f"🎯 Smart Job Match ({source})\n\n{caption}"[:1024]
-            await bot.send_document(
-                chat_id=owner_chat_id or OWNER,
-                document=io.BytesIO(pdf),
-                filename=filename,
-                caption=final_caption,
-                reply_markup=keyboard,
-            )
+            caption = f"🎯 Smart Job Match ({source})\n\n{caption}"[:1024]
+        target_chat = reply_to_message.chat_id if reply_to_message else (owner_chat_id or OWNER)
+
+        # 1) the tailored resume, 2) the email draft with approval buttons underneath
+        if reply_to_message:
+            await reply_to_message.reply_document(document=io.BytesIO(pdf), filename=filename, caption=caption)
         else:
-            final_caption = caption[:1024]
-            if reply_to_message:
-                await reply_to_message.reply_document(
-                    document=io.BytesIO(pdf),
-                    filename=filename,
-                    caption=final_caption,
-                    reply_markup=keyboard,
-                )
-            else:
-                await bot.send_document(
-                    chat_id=owner_chat_id or OWNER,
-                    document=io.BytesIO(pdf),
-                    filename=filename,
-                    caption=final_caption,
-                    reply_markup=keyboard,
-                )
+            await bot.send_document(chat_id=target_chat, document=io.BytesIO(pdf), filename=filename, caption=caption)
+        await _send_email_review(bot, target_chat, key, item_data)
     except Exception as exc:
         if is_proactive:
             log.error("Proactive draft failed: %s", exc)
@@ -578,10 +587,12 @@ async def process_job_posting(
                 "fit_score_10": fit_score_10, "sheet_row": sheet_row,
                 "job_text": job_text, "company_ctx": company_ctx, "role_raw": role,
                 "template_role": None, "email_body": email_body, "cover_letter_text": cover_letter_text,
+                "resume_text": uploaded_text,
             }
             caption = _make_caption(role, company, template_label, fit_score_10, "data_analyst")
             await status.delete()
-            await message.reply_document(document=io.BytesIO(pdf), filename=filename, caption=caption, reply_markup=_approval_keyboard(key, None, False))
+            await message.reply_document(document=io.BytesIO(pdf), filename=filename, caption=caption)
+            await _send_email_review(ctx.bot, message.chat_id, key, ctx.bot_data[key])
         except Exception as exc:
             await status.edit_text(f"Sorry, I couldn't generate the resume: {exc}")
         return
@@ -668,6 +679,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # Regenerate cover letter + email body for the new template
         try:
             new_resume = read_docx_text(TEMPLATES[new_role])
+            item["resume_text"] = new_resume
             new_cover = generate_cover_letter(
                 role=item.get("role_raw") or ROLE_LABELS[new_role],
                 company=item.get("company", ""),
@@ -712,8 +724,32 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.message.reply_document(
             document=io.BytesIO(pdf), filename=item["filename"],
             caption=_make_caption(item.get("role_raw", ""), company, item["resume_used"], fit_10, new_role),
-            reply_markup=_approval_keyboard(key, new_role, True),
         )
+        await _send_email_review(ctx.bot, query.message.chat_id, key, item)
+    elif action == "rw":
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        status = await query.message.reply_text("Rewriting the email…")
+        try:
+            resume_text = item.get("resume_text") or RESUME
+            role_for = item.get("role_raw") or item.get("role") or "the role"
+            new_cover = generate_cover_letter(
+                role=role_for, company=item.get("company", ""), jd=item["job_text"],
+                resume_text=resume_text, company_ctx=item.get("company_ctx", ""), fresh=True,
+            )
+            item["cover_letter_text"] = new_cover
+            item["email_body"] = generate_email_body(
+                role=role_for, company=item.get("company", ""), jd_summary=item["job_text"][:1500],
+                cover_letter=new_cover, fresh=True,
+            )
+        except Exception as exc:
+            await status.edit_text(f"Couldn't rewrite the email: {str(exc)[:300]}")
+            await _send_email_review(ctx.bot, query.message.chat_id, key, item)  # keep the old draft + buttons
+            return
+        await status.delete()
+        await _send_email_review(ctx.bot, query.message.chat_id, key, item)
     elif action == "no":
         try:
             await query.message.edit_reply_markup(reply_markup=None)
