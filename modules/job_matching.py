@@ -7,6 +7,7 @@ Provides fit scoring and customizable frequency control.
 import re
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from ddgs import DDGS
@@ -32,6 +33,37 @@ _SKILL_KEYWORDS = (
     "python", "sql", "data", "machine learning", "etl", "pipeline", "llm",
     "ai", "analytics", "spark", "airflow", "databricks",
 )
+
+
+# ddgs queries several search engines. A single slow/failing engine (e.g. mojeek timing out)
+# used to abort the whole search, so we try engines one at a time and skip the bad ones.
+_SEARCH_BACKENDS = ("yahoo", "bing", "duckduckgo", "brave")
+_SEARCH_TIMEOUT = 8  # seconds per engine
+
+
+def _web_search(queries: List[str], max_results: int) -> List[Dict]:
+    """Return results for the first query/engine combination that works."""
+    last_exc = None
+    for query in queries:
+        failures = 0
+        for backend in _SEARCH_BACKENDS:
+            try:
+                try:
+                    client = DDGS(timeout=_SEARCH_TIMEOUT)
+                except TypeError:  # older ddgs versions without a timeout argument
+                    client = DDGS()
+                results = list(client.text(query, max_results=max_results, backend=backend))
+                if results:
+                    return results
+            except Exception as exc:
+                failures += 1
+                last_exc = exc
+                print(f"Search engine '{backend}' failed: {str(exc)[:160]}")
+        if failures == len(_SEARCH_BACKENDS):
+            break  # every engine errored (network problem) - a second query would only wait again
+    if last_exc:
+        print(f"Search failed for this role: {str(last_exc)[:160]}")
+    return []
 
 
 def _get_resume_text(role_key: str) -> str:
@@ -84,11 +116,11 @@ def search_jobs_for_role(role_key: str, max_results: int = 8) -> List[Dict]:
 
     # Build targeted search query from role and top skills
     role_label = ROLE_LABELS.get(role_key, role_key)
-    query = f'"{role_label}" job "apply" "email" OR "recruiter" -indeed -glassdoor'
+    strict_query = f'"{role_label}" job "apply" "email" OR "recruiter" -indeed -glassdoor'
+    loose_query = f"{role_label} job vacancy apply email recruiter"
 
     try:
-        ddgs = DDGS()
-        raw_results = ddgs.text(query, max_results=max_results)
+        raw_results = _web_search([strict_query, loose_query], max_results)
 
         for item in raw_results:
             title = (item.get("title") or "").strip()
@@ -187,10 +219,12 @@ def run_job_scan(force: bool = False) -> List[Dict]:
 
     _job_state["last_search"] = now
 
+    # Search the roles in parallel so one slow search engine can't stall the whole scan.
+    role_keys = list(TEMPLATES)
     all_jobs: List[Dict] = []
-    for role_key in TEMPLATES:
-        jobs = search_jobs_for_role(role_key, max_results=max_results)
-        all_jobs.extend(jobs)
+    with ThreadPoolExecutor(max_workers=max(1, len(role_keys))) as pool:
+        for jobs in pool.map(lambda rk: search_jobs_for_role(rk, max_results=max_results), role_keys):
+            all_jobs.extend(jobs)
 
     # Deduplicate by title (case-insensitive)
     unique_jobs: List[Dict] = []
