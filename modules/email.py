@@ -120,75 +120,49 @@ def generate_email_body(
     jd_summary: str,
     cover_letter: Optional[str] = None,
     recruiter_name: Optional[str] = None,
+    fresh: bool = False,
 ) -> str:
     """
-    Generate a personalized application email body.
-    Includes the cover letter formatted naturally into the body text.
+    Generate a SHORT personalized application email (about 80-110 words).
+    The cover letter, when given, is only source material to condense.
+    The signature is added by code (see _enforce_signature), never by the AI.
+    fresh=True bypasses the response cache so a "rewrite" gives a new variation.
     """
-    contact_info = (
-        f"Applicant Name: {OWNER_NAME}\n"
-        f"Applicant Email: {OWNER_EMAIL}\n"
-        f"Applicant Phone: {OWNER_PHONE}\n"
-        f"Applicant Location: {OWNER_LOCATION}\n"
-        f"Applicant LinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
-        f"Applicant Portfolio: {REFERENCE_LINKS.get('Portfolio', '')}\n"
-    )
+    greeting = f"Dear {recruiter_name}," if recruiter_name else "Dear Hiring Team,"
 
     prompt = (
-        f"Write a professional application email to send to a recruiter.\n"
-        f"{contact_info}\n"
+        f"Write a short, professional job application email body for {OWNER_NAME}.\n"
         f"Role: {role}\n"
-        f"Company: {company}\n"
-        f"Recruiter Name: {recruiter_name or 'Hiring Manager'}\n\n"
-        f"Job Details / Requirements:\n{jd_summary[:1500]}\n\n"
-        f"CRITICAL RULES:\n"
-        f"1. LOCATION: The applicant is based in {OWNER_LOCATION}. "
-        f"NEVER state or imply that the applicant is based in, living in, or a local resident of the company's city/country "
-        f"(e.g. NEVER write 'Being based in Sydney' or 'As a resident of...').\n"
-        f"2. NO PLACEHOLDERS: NEVER write bracketed placeholders like [Your Email Address], [Your Phone Number], [Your LinkedIn Profile URL]. "
-        f"Use the actual applicant contact details provided above.\n"
+        f"Company: {company}\n\n"
+        f"Job details:\n{jd_summary[:1200]}\n\n"
+        + (f"Source material (condense it, do not paste it):\n{cover_letter[:1800]}\n\n" if cover_letter else "")
+        + "RULES:\n"
+        f"1. Start exactly with: {greeting}\n"
+        "2. LENGTH: at most 100 words after the greeting. Two short paragraphs, 2-3 sentences each.\n"
+        "3. Paragraph 1: say you are applying for the role and name the 2 strongest, most relevant "
+        "skills or achievements from the source material. Use only facts from it; never invent anything.\n"
+        "4. Paragraph 2: one sentence that the resume is attached, one sentence offering to discuss.\n"
+        f"5. LOCATION: the applicant is based in {OWNER_LOCATION}. Never say or imply the applicant lives in "
+        "the company's city or country.\n"
+        "6. NO signature, NO sign-off, NO contact details, NO square-bracket placeholders. "
+        "Stop after the last sentence.\n"
+        "7. Plain text only. No subject line. No markdown. English only."
     )
-
-    if cover_letter:
-        prompt += (
-            f"Embed and format this cover letter cleanly inside the email body:\n"
-            f"{cover_letter}\n\n"
-            "Format: Warm professional greeting, 1 brief intro sentence, then the cover letter text "
-            "formatted with clean line breaks, ending with a polite sign-off mentioning the attached resume.\n"
-            f"Signature format:\nWarm regards,\n\n{OWNER_NAME}\n{role or 'Engineer'}\n"
-            f"Email: {OWNER_EMAIL}\nPhone: {OWNER_PHONE}\nLinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
-        )
-    else:
-        prompt += (
-            "Write a personalized, concise email (3 short paragraphs) expressing enthusiasm for the role, "
-            "highlighting 2 relevant strengths/achievements aligned with the job, and mentioning the attached resume.\n"
-            f"Signature format:\nWarm regards,\n\n{OWNER_NAME}\n{role or 'Engineer'}\n"
-            f"Email: {OWNER_EMAIL}\nPhone: {OWNER_PHONE}\nLinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
-        )
-
-    prompt += "\nReturn ONLY the email body text in English. No subject line. No markdown."
+    if fresh:
+        prompt += "\n8. Write a fresh variation with a different opening and different wording than usual."
 
     try:
-        body, _ = ask(prompt, task="email")
+        body, _ = ask(prompt, task="email", use_cache=not fresh)
         return _clean_email_body(body, role=role, company=company, recruiter_name=recruiter_name)
-    except Exception as exc:
-        # Fallback if LLM call fails
-        greeting = f"Dear {recruiter_name}," if recruiter_name else "Dear Hiring Team,"
+    except Exception:
+        # Fallback if every LLM provider fails: still short and honest.
         position = f" for the {role} position" if role else ""
         at_company = f" at {company}" if company else ""
         fallback = (
             f"{greeting}\n\n"
-            f"I am writing to express my strong interest in the {role} position at {company}.\n\n"
-        )
-        if cover_letter:
-            fallback += f"{cover_letter}\n\n"
-        fallback += (
-            f"Please find attached my resume{position}{at_company} for your review.\n\n"
-            f"Best regards,\n\n"
-            f"{OWNER_NAME}\n"
-            f"Email: {OWNER_EMAIL}\n"
-            f"Phone: {OWNER_PHONE}\n"
-            f"LinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}\n"
+            f"I am writing to apply{position}{at_company}. My background in data engineering, "
+            f"analytics and AI applications aligns well with the role.\n\n"
+            f"My resume is attached for your review, and I would be glad to discuss how I can contribute."
         )
         return _clean_email_body(fallback, role=role, company=company, recruiter_name=recruiter_name)
 
