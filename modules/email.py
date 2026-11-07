@@ -24,17 +24,72 @@ from config.settings import (
 from modules.llm_provider import ask
 
 
+_SIGNOFF_RE = re.compile(
+    r"^\s*(?:warm regards|best regards|kind regards|best wishes|yours sincerely|yours faithfully|"
+    r"sincerely|regards|respectfully|cheers|thanks|thank you)\s*[,!.]?\s*$",
+    re.I,
+)
+_CONTACT_LINE_RE = re.compile(r"^\s*(?:email|e-mail|phone|mobile|linkedin|github|portfolio|location)\s*:", re.I)
+
+
+def _signature(role: str = "") -> str:
+    """Fixed signature built from settings, never from the AI's text."""
+    return (
+        "Warm regards,\n\n"
+        f"{OWNER_NAME}\n"
+        f"{role or 'Engineer'}\n"
+        f"Email: {OWNER_EMAIL}\n"
+        f"Phone: {OWNER_PHONE}\n"
+        f"LinkedIn: {REFERENCE_LINKS.get('LinkedIn', '')}"
+    )
+
+
+def _enforce_signature(text: str, role: str = "") -> str:
+    """Drop whatever sign-off/contact block the AI wrote and append the real one."""
+    lines = text.rstrip().split("\n")
+    cut = None
+    # Prefer the last sign-off line within the final lines of the email.
+    for i in range(len(lines) - 1, max(-1, len(lines) - 13), -1):
+        if _SIGNOFF_RE.match(lines[i]):
+            cut = i
+            break
+    if cut is None:
+        # No sign-off found: trim trailing name/contact lines so we don't duplicate them.
+        cut = len(lines)
+        while cut > 0:
+            last = lines[cut - 1].strip()
+            if not last or _CONTACT_LINE_RE.match(last) or last.lower() == OWNER_NAME.lower():
+                cut -= 1
+            else:
+                break
+    body = "\n".join(lines[:cut]).rstrip()
+    return f"{body}\n\n{_signature(role)}"
+
+
+_NOT_HOME = r"(?!Nilambur|Kerala|India)"
+
+
 def _clean_email_body(text: str, role: str = "", company: str = "", recruiter_name: Optional[str] = None) -> str:
-    """Clean hallucinated locations and substitute any square-bracket placeholders with actual values."""
-    # Remove fabricated city residency like "Being based in Sydney, "
-    text = re.sub(r"\bBeing based in (?!Nilambur|Kerala|India)[^,\.\n]+,\s*", "", text, flags=re.I)
-    text = re.sub(r"\bAs a (?:resident|local) of (?!Nilambur|Kerala|India)[^,\.\n]+,\s*", "", text, flags=re.I)
+    """Remove hallucinated locations and placeholders, and force the real signature."""
+    # Fabricated residency: "Being based in Sydney, ..." / "Currently located in X, ..."
+    text = re.sub(
+        rf"\b(?:Being|Living|Residing|Currently)\s+(?:based|located|living|residing)\s+in\s+{_NOT_HOME}[^,\.\n]+,\s*",
+        "", text, flags=re.I,
+    )
+    text = re.sub(rf"\bBased in\s+{_NOT_HOME}[^,\.\n]+,\s*(?=I\b)", "", text)
+    text = re.sub(rf"\bAs a (?:resident|local) of\s+{_NOT_HOME}[^,\.\n]+,\s*", "", text, flags=re.I)
+    # First-person claims without a leading clause: "I am based in Sydney."
+    text = re.sub(
+        rf"[^.\n]*\bI(?: am|'m|’m)\s+(?:currently\s+)?(?:based|located|living|residing)\s+in\s+{_NOT_HOME}[^.\n]*\.\s*",
+        "", text, flags=re.I,
+    )
+    # Re-capitalise a sentence that lost its introductory clause.
     text = re.sub(r"(?<=\n\n)([a-z])", lambda m: m.group(1).upper(), text)
 
     linkedin_url = REFERENCE_LINKS.get("LinkedIn", "")
     portfolio_url = REFERENCE_LINKS.get("Portfolio", "")
 
-    # Replace specific bracketed placeholders with real contact info
+    # Replace specific bracketed placeholders with real values
     replacements = [
         (r"\[(?:Your\s*)?Email(?:\s*Address)?\]", OWNER_EMAIL),
         (r"\[(?:Your\s*)?Phone(?:\s*Number)?\]", OWNER_PHONE),
@@ -45,15 +100,18 @@ def _clean_email_body(text: str, role: str = "", company: str = "", recruiter_na
         (r"\[(?:Your\s*)?Name\]", OWNER_NAME),
         (r"\[(?:Insert\s*)?Date\]", ""),
         (r"\[Company(?:\s*Name)?\]", company),
-        (r"\[(?:Target\s*)?Role\]", role),
-        (r"\[(?:Hiring\s*Manager|Recruiter)(?:\s*Name)?\]", recruiter_name or "Hiring Team"),
+        (r"\[(?:Target\s*)?(?:Job\s*)?(?:Role|Position|Title)\]", role),
+        (r"\[(?:Hiring\s*Manager|Recruiter)(?:['’]s)?(?:\s*Name)?\]", recruiter_name or "Hiring Team"),
     ]
     for pat, rep in replacements:
         text = re.sub(pat, rep, text, flags=re.I)
 
-    # Clean any lingering [Your ...] or [Insert ...] artifacts
-    text = re.sub(r"\[(?:Your|Insert)\s+[^\]]+\]", "", text, flags=re.I)
-    return text.strip()
+    # Catch-all: no square-bracket template text should ever reach a recruiter.
+    text = re.sub(r"\[[^\]\n]{1,80}\]", "", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return _enforce_signature(text.strip(), role)
 
 
 def generate_email_body(
@@ -189,7 +247,7 @@ def send_mail(
     message["Subject"] = subject
 
     if custom_body:
-        message.set_content(custom_body)
+        message.set_content(_clean_email_body(custom_body, role=role, company=company))
     else:
         greeting = "Dear Hiring Team,"
         position = f" for the {role} position" if role else ""
