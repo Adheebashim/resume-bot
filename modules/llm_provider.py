@@ -37,13 +37,23 @@ class LLMError(Exception):
 # API Keys (centralised in config.settings, which also feeds bot.py)
 from config.settings import INCEPTION_KEY, GEMINI_KEY, GROQ_KEY
 
-# Provider-specific configurations
+def _model(env_name: str, default: str) -> str:
+    """Model IDs can be overridden from Render env vars, so the next model
+    retirement is a settings change instead of a code change."""
+    return (os.environ.get(env_name) or "").strip() or default
+
+
+# Provider-specific configurations.
+# Defaults verified against each provider's deprecation page (Nov 2026):
+#   - Gemini 2.0 Flash was shut down on 2026-06-01 -> gemini-3.5-flash-lite / gemini-3.8-flash
+#   - Groq llama-3.1-8b-instant and llama-3.3-70b-versatile were shut down on 2026-08-16
+#     -> openai/gpt-oss-20b / openai/gpt-oss-120b
 PROVIDER_CONFIG = {
     "inception": {
         "base_url": "https://api.inceptionlabs.ai/v1/chat/completions",
         "models": {
-            "light": "mercury-3",
-            "heavy": "mercury-3",
+            "light": _model("INCEPTION_MODEL", "mercury-3"),
+            "heavy": _model("INCEPTION_MODEL", "mercury-3"),
             "vision": None,  # Add if Inception supports vision
         },
         "supports_json": True,
@@ -53,9 +63,9 @@ PROVIDER_CONFIG = {
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/models",
         "models": {
-            "light": "gemini-2.0-flash",
-            "heavy": "gemini-2.0-flash",
-            "vision": "gemini-2.0-flash",
+            "light": _model("GEMINI_MODEL_LIGHT", "gemini-3.5-flash-lite"),
+            "heavy": _model("GEMINI_MODEL_HEAVY", "gemini-3.8-flash"),
+            "vision": _model("GEMINI_MODEL_VISION", "gemini-3.8-flash"),
         },
         "supports_json": True,
         "supports_vision": True,
@@ -64,8 +74,8 @@ PROVIDER_CONFIG = {
     "groq": {
         "base_url": "https://api.groq.com/openai/v1/chat/completions",
         "models": {
-            "light": "llama-3.1-8b-instant",
-            "heavy": "llama-3.3-70b-versatile",
+            "light": _model("GROQ_MODEL_LIGHT", "openai/gpt-oss-20b"),
+            "heavy": _model("GROQ_MODEL_HEAVY", "openai/gpt-oss-120b"),
             "vision": None,
         },
         "supports_json": True,
@@ -73,6 +83,17 @@ PROVIDER_CONFIG = {
         "cost_tier": 2,
     },
 }
+
+# Gemini 3.x / gpt-oss are reasoning models: their hidden "thinking" tokens count
+# against the output limit, so a small cap can return an empty/truncated answer.
+# We keep thinking low and give them headroom on top of MAX_OUT.
+THINKING_HEADROOM = 1500
+
+
+def _gemini_thinking_level(model: str) -> str:
+    """Lowest thinking level the model supports (3.8-flash has no 'minimal')."""
+    return "minimal" if "lite" in model else "low"
+
 
 # Output token limits per task
 MAX_OUT = {"light": 800, "chat": 500, "heavy": 3500, "vision": 2000, "email": 1200, "cover_letter": 1500}
@@ -187,9 +208,11 @@ def _inception_once(model: str, task: str, prompt: str, json_mode: bool, optiona
 
 def _gemini_once(model: str, task: str, prompt: str, json_mode: bool, image, optional: bool) -> str:
     """Call Gemini API."""
-    gen = {"temperature": 0.3, "maxOutputTokens": MAX_OUT[task]}
-    if optional and json_mode:
-        gen["responseMimeType"] = "application/json"
+    gen = {"temperature": 0.3, "maxOutputTokens": MAX_OUT[task] + THINKING_HEADROOM}
+    if optional:
+        gen["thinkingConfig"] = {"thinkingLevel": _gemini_thinking_level(model)}
+        if json_mode:
+            gen["responseMimeType"] = "application/json"
 
     parts = [{"text": prompt}]
     if image:
@@ -222,12 +245,15 @@ def _gemini_once(model: str, task: str, prompt: str, json_mode: bool, image, opt
 
 def _groq_once(model: str, task: str, prompt: str, json_mode: bool, optional: bool) -> str:
     """Call Groq API (OpenAI-compatible)."""
+    is_reasoning = "gpt-oss" in model
     body = {
         "model": model,
         "temperature": 0.3,
-        "max_tokens": MAX_OUT[task],
+        "max_tokens": MAX_OUT[task] + (THINKING_HEADROOM if is_reasoning else 0),
         "messages": [{"role": "user", "content": prompt}],
     }
+    if optional and is_reasoning:
+        body["reasoning_effort"] = "low"
     if optional and json_mode:
         body["response_format"] = {"type": "json_object"}
 
