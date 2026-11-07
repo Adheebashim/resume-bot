@@ -768,6 +768,34 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------
 # Background job scanning (respects ALERT_INTERVAL_MIN throttle)
 # ---------------------------------------------------------------------
+async def handle_scan_results(bot, bot_data: dict, jobs: list, source: str, chat_id=None) -> None:
+    """Shared by the background loop and the dashboard 'Run a scan now' button:
+    1) send the full list of matches to Telegram, 2) draft an application (with the
+    email review step) for every job that has an HR email."""
+    chat_id = chat_id or OWNER
+    if not jobs:
+        return
+    try:
+        await bot.send_message(chat_id=chat_id, text=format_job_alerts(jobs)[:4000])
+    except Exception as exc:
+        log.error("Could not send job alert summary: %s", exc)
+    for job in jobs:
+        if not job.get("emails"):
+            continue
+        try:
+            await _process_and_draft(
+                bot,
+                f"{job['title']}\n{job['url']}\n{job['snippet']}",
+                job["emails"][0],
+                source=source,
+                bot_data=bot_data,
+                owner_chat_id=chat_id,
+                is_proactive=True,
+            )
+        except Exception as exc:
+            log.error("Scan draft failed for %s: %s", job.get("title"), exc)
+
+
 def _job_scan_loop(application) -> None:
     """Continuously scan for matching jobs and send alerts if enabled.
 
@@ -785,24 +813,18 @@ def _job_scan_loop(application) -> None:
         time.sleep(interval_min * 60)
         try:
             jobs = run_job_scan()
-            for job in jobs:
-                if job.get("emails"):
-                    recipient = job["emails"][0]
-                    if _MAIN_LOOP and _MAIN_LOOP.is_running():
-                        coro = _process_and_draft(
-                            application.bot,
-                            f"{job['title']}\n{job['url']}\n{job['snippet']}",
-                            recipient,
-                            source="Background Scan",
-                            bot_data=application.bot_data,
-                            owner_chat_id=OWNER,
-                            is_proactive=True,
-                        )
-                        future = asyncio.run_coroutine_threadsafe(coro, _MAIN_LOOP)
-                        try:
-                            future.result(timeout=120)
-                        except Exception as draft_exc:
-                            log.error("Background draft error: %s", draft_exc)
+            if jobs and _MAIN_LOOP and _MAIN_LOOP.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    handle_scan_results(
+                        application.bot, application.bot_data, jobs,
+                        source="Background Scan", chat_id=OWNER,
+                    ),
+                    _MAIN_LOOP,
+                )
+                try:
+                    future.result(timeout=1200)
+                except Exception as draft_exc:
+                    log.error("Background scan handling error: %s", draft_exc)
             if jobs:
                 log.info("Job scan: %d fresh matches found and drafted", len(jobs))
         except Exception as exc:
