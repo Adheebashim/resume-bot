@@ -13,6 +13,7 @@ import tornado.web
 from typing import Dict, List, Optional
 
 from config.settings import (
+    OWNER,
     OWNER_NAME,
     ROLE_LABELS,
     BASE_URL,
@@ -40,6 +41,47 @@ STATS = {
     "scan_running": False,
     "last_scan_result": None,
 }
+
+
+_BG_TASKS = set()  # keeps references to background draft tasks so they aren't garbage-collected
+
+
+def _scan_results_html(result) -> str:
+    """HTML for the 'Last scan results' panel (server-rendered, also returned by the scan API)."""
+    jobs = (result or {}).get("jobs") or []
+    if not jobs:
+        msg = "No scan has been run since the bot started. Click “Run a scan now”." if not result \
+            else "The last scan found no new matches."
+        return f'<div class="empty">{_html.escape(msg)}</div>'
+    rows = []
+    for j in jobs:
+        url = str(j.get("url") or "")
+        title = _html.escape(str(j.get("title") or "Untitled"))
+        if url.startswith(("http://", "https://")):
+            title = f'<a href="{_html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{title}</a>'
+        emails = j.get("emails") or []
+        if emails:
+            contact = _html.escape(", ".join(emails[:2]))
+            status = '<span class="ok-text">Draft sent to Telegram</span>'
+        else:
+            contact = "—"
+            status = '<span class="muted-text">No HR email — open link</span>'
+        fit = j.get("fit_score") or 0
+        rows.append(
+            "<tr>"
+            f"<td>{_html.escape(str(j.get('role_label') or ''))}</td>"
+            f"<td>{title}</td>"
+            f"<td>{fit}/100</td>"
+            f"<td>{contact}</td>"
+            f"<td>{status}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table><thead><tr>'
+        '<th scope="col">Resume</th><th scope="col">Job</th><th scope="col">Fit</th>'
+        '<th scope="col">HR email</th><th scope="col">Status</th>'
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
+    )
 
 
 def set_bot_application(app):
@@ -325,6 +367,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* --- Scan results --- */
+td a { color: var(--info); text-decoration: none; }
+td a:hover { text-decoration: underline; }
+.ok-text { color: var(--ok); font-weight: 600; }
+.muted-text { color: var(--muted); }
+
 /* --- Table --- */
 .table-wrap {
   overflow: hidden; border: 1px solid var(--hairline);
@@ -442,7 +490,14 @@ scanBtn.addEventListener('click', async () => {
     const data = await res.json();
     if (res.ok) {
       const n = data.found ?? 0;
-      toast(n ? `Scan complete — ${n} fresh match(es) found.` : 'Scan complete — no new matches.');
+      const box = document.getElementById('scan-results');
+      if (box && data.html) box.innerHTML = data.html;
+      const meta = document.getElementById('scan-meta');
+      if (meta) meta.textContent = n + ' job(s) · ' + (data.scanned_at || '');
+      toast(n
+        ? `Scan complete — ${n} job(s) found, ${data.with_email || 0} with an HR email. Sent to Telegram.`
+        : 'Scan complete — no new matches.');
+      if (box) box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
     } else {
       toast(data.error || 'Scan failed.', true);
     }
@@ -600,6 +655,10 @@ renderApps();
 testProviders();
 """
 
+        _scan = STATS.get("last_scan_result")
+        scan_html = _scan_results_html(_scan)
+        scan_meta = _html.escape(f"{_scan['found']} job(s) · {_scan['scanned_at']}") if _scan else ""
+
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -693,6 +752,14 @@ testProviders();
                 </section>
             </div>
         </div>
+
+        <section class="panel" aria-labelledby="scan-h">
+            <div class="panel-head">
+                <h2 id="scan-h">Last scan results</h2>
+                <span class="count" id="scan-meta">{scan_meta}</span>
+            </div>
+            <div id="scan-results">{scan_html}</div>
+        </section>
 
         <section class="panel" aria-labelledby="apps-h">
             <div class="panel-head">
@@ -814,28 +881,40 @@ class TriggerScanApiHandler(tornado.web.RequestHandler):
             loop = asyncio.get_running_loop()
             jobs = await loop.run_in_executor(None, run_job_scan, True)
 
+            with_email = sum(1 for j in jobs if j.get("emails"))
             if _BOT_APPLICATION and jobs:
-                from bot import _process_and_draft
-                for job in jobs:
-                    if job.get("emails"):
-                        recipient = job["emails"][0]
-                        asyncio.create_task(_process_and_draft(
-                            _BOT_APPLICATION.bot,
-                            f"{job['title']}\n{job['url']}\n{job['snippet']}",
-                            recipient,
-                            source="Dashboard Manual Scan",
-                            bot_data=_BOT_APPLICATION.bot_data,
-                            owner_chat_id=int(os.environ.get("OWNER_ID", 0)),
-                            is_proactive=True,
-                        ))
+                # Telegram: full job list first, then drafts (with the email review step)
+                # for every job that has an HR email. Runs in the background so this
+                # request returns immediately.
+                from bot import handle_scan_results
+                task = asyncio.create_task(handle_scan_results(
+                    _BOT_APPLICATION.bot,
+                    _BOT_APPLICATION.bot_data,
+                    jobs,
+                    source="Dashboard Manual Scan",
+                    chat_id=OWNER or None,
+                ))
+                _BG_TASKS.add(task)
+                task.add_done_callback(_BG_TASKS.discard)
 
             stats = {
                 "found": len(jobs),
                 "count": len(jobs),
+                "with_email": with_email,
                 "scanned_at": datetime.now().strftime("%H:%M:%S"),
+                "jobs": [
+                    {
+                        "title": j.get("title", ""),
+                        "url": j.get("url", ""),
+                        "role_label": j.get("role_label", ""),
+                        "emails": j.get("emails", []),
+                        "fit_score": j.get("fit_score", 0),
+                    }
+                    for j in jobs
+                ],
             }
             STATS["last_scan_result"] = stats
-            self.write({"ok": True, **stats})
+            self.write({"ok": True, **stats, "html": _scan_results_html(stats)})
         except Exception as exc:
             log.exception("Manual scan from dashboard failed")
             self.write({"ok": False, "error": str(exc), "found": 0})
