@@ -52,13 +52,12 @@ def _determine_length_instruction(jd: str, role: str) -> str:
 
     if is_senior or is_detailed_jd:
         return (
-            "Write a compelling 250-320 word cover letter. Focus on architectural decisions, "
-            "production deployments, quantifiable business impact, and leadership in technical solutions."
+            "Write a focused 150-190 word cover letter. Focus on production deployments and "
+            "quantifiable business impact."
         )
     return (
-        "Write a punchy, focused 160-220 word cover letter (3 short paragraphs). "
-        "Hook the reader immediately, cite 2 specific matching technical achievements, "
-        "and express genuine enthusiasm for the company's mission."
+        "Write a punchy 110-150 word cover letter (2-3 short paragraphs). "
+        "Cite 2 specific matching technical achievements and express genuine enthusiasm for the company."
     )
 
 
@@ -69,6 +68,7 @@ def generate_cover_letter(
     resume_text: str,
     company_ctx: Optional[str] = None,
     recruiter_name: Optional[str] = None,
+    fresh: bool = False,
 ) -> str:
     """
     Generate a tailored cover letter formatted as clean text for email body.
@@ -100,7 +100,9 @@ def generate_cover_letter(
     )
 
     try:
-        cover_letter, _ = ask(prompt, task="cover_letter")
+        if fresh:
+            prompt += "\n\nWrite a fresh variation with a different opening and wording than usual."
+        cover_letter, _ = ask(prompt, task="cover_letter", use_cache=not fresh)
         return _clean_cover_letter(cover_letter)
     except Exception as exc:
         # Fallback short template
