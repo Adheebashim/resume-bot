@@ -28,6 +28,12 @@ _job_state = {
 }
 
 
+_SKILL_KEYWORDS = (
+    "python", "sql", "data", "machine learning", "etl", "pipeline", "llm",
+    "ai", "analytics", "spark", "airflow", "databricks",
+)
+
+
 def _get_resume_text(role_key: str) -> str:
     """Read text content from a Word template resume."""
     try:
@@ -106,14 +112,12 @@ def search_jobs_for_role(role_key: str, max_results: int = 8) -> List[Dict]:
                 ("example.com", "wixsite.com", "no-reply.com", "noreply.com")
             )]
 
-            # Basic relevance check against resume keywords
-            resume_lower = resume_text.lower()
-            snippet_lower = (title + " " + snippet).lower()
+            # Relevance check: count skill keywords found in the POSTING itself
+            # (earlier code also counted words from the resume, so everything passed).
+            posting_text = (title + " " + snippet).lower()
             keyword_hits = sum(
-                1 for word in ("python", "sql", "data", "machine learning",
-                               "etl", "pipeline", "llm", "ai", "analytics",
-                               "spark", "airflow", "databricks")
-                if word in snippet_lower or word in resume_lower
+                1 for word in _SKILL_KEYWORDS
+                if re.search(rf"\b{re.escape(word)}\b", posting_text)
             )
 
             result = {
@@ -128,7 +132,7 @@ def search_jobs_for_role(role_key: str, max_results: int = 8) -> List[Dict]:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
-            if email_filter or keyword_hits >= 3:
+            if email_filter or keyword_hits >= 2:
                 results.append(result)
 
     except Exception as exc:
@@ -231,17 +235,22 @@ def format_job_alerts(jobs: List[Dict]) -> str:
         return "No new matching job alerts found. I'll keep checking automatically."
 
     interval_min = RUNTIME_SETTINGS.get("ALERT_INTERVAL_MIN", 15)
-    lines = ["🎯 Smart Job Alerts — Fresh Matches Found", ""]
+    with_email = sum(1 for j in jobs if j.get("emails"))
+    lines = [f"🎯 Smart Job Alerts — {len(jobs)} fresh match(es)", ""]
     for i, job in enumerate(jobs, 1):
-        role_tag = f"[{job.get('role_label', 'Match')}]"
+        role_tag = job.get("role_label") or "Match"
         fit = job.get("fit_score", 0)
         fit_str = f" · Fit {fit}/100" if fit else ""
         lines.append(f"{i}. {job['title']}{fit_str}")
+        lines.append(f"   🏷 {role_tag}")
         if job.get("emails"):
-            lines.append(f"   📧 HR Email: {', '.join(job['emails'][:2])}")
+            lines.append(f"   📧 HR Email: {', '.join(job['emails'][:2])} → draft coming below")
+        else:
+            lines.append("   📭 No HR email in the listing — open the link, or send me the post + recruiter email")
         if job.get("url"):
             lines.append(f"   🔗 {job['url'][:120]}")
         lines.append("")
 
-    lines.append(f"Scan frequency: every {interval_min} min · Top {len(jobs)} shown")
+    lines.append(f"{with_email} of {len(jobs)} have an HR email and are being drafted for your approval.")
+    lines.append(f"Scan frequency: every {interval_min} min")
     return "\n".join(lines)
